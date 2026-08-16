@@ -499,6 +499,30 @@ function tocarFraseSistema(){
 }
 
 /* ---------- controle unificado ---------- */
+
+// O <audio> precisa de um play() em contexto de gesto do usuário no iOS para
+// que reproduções futuras (Piper em segundo plano) funcionem com tela apagada.
+// Fazemos isso UMA VEZ no primeiro tocar() e nunca mais.
+let _audioPrimado = false;
+
+/* Lógica interna: inicia a leitura do capítulo atual.
+   Chamada por tocar() e por avancarCapituloAuto() — não faz prime iOS. */
+async function _iniciarCapitulo(){
+  if(!estado.tocando) return;
+  if(await tentarModoAudio()){
+    if(!estado.tocando) return;
+    marcarFrase();
+    audioEl.play().catch(() => {
+      estado.modoAudio = false;
+      if(estado.tocando) tocarFraseSistema();
+    });
+  } else {
+    if(!estado.tocando) return;
+    estado.modoAudio = false;
+    tocarFraseSistema();
+  }
+}
+
 async function tocar(){
   if(!estado.frases.length) return;
   if(estado.pausadoEm && Date.now() - estado.pausadoEm > 30000 && estado.fraseIdx > 0){
@@ -508,24 +532,22 @@ async function tocar(){
   estado.tocando = true;
   atualizarIconePlay();
   agendarGeracao();
-  if(await tentarModoAudio()){
-    if(!estado.tocando) return;
-    marcarFrase();
-    audioEl.play().catch(() => { estado.modoAudio = false; if(estado.tocando) tocarFraseSistema(); });
-  } else {
-    if(!estado.tocando) return;
-    // iOS: preparar o <audio> dentro do gesto para Piper funcionar depois
+
+  // iOS: prime do <audio> apenas no primeiro play (precisa de gesto)
+  if(!_audioPrimado){
     try{
-      const sil = montarWav({canais: 1, taxa: 22050, bits: 16}, [new Uint8Array(44)]);
+      // 0,1 s de silêncio — curto demais para ouvir, longo bastante para valer no iOS
+      const sil = montarWav({canais: 1, taxa: 22050, bits: 16}, [new Uint8Array(4410)]);
       audioEl.src = URL.createObjectURL(new Blob([sil], {type: 'audio/wav'}));
       _pausaProg = true;
       await audioEl.play(); audioEl.pause();
       _pausaProg = false;
+      _audioPrimado = true;
     }catch{ _pausaProg = false; }
     if(!estado.tocando) return;
-    estado.modoAudio = false;
-    tocarFraseSistema();
   }
+
+  await _iniciarCapitulo();
 }
 
 function pausar(){
@@ -561,24 +583,43 @@ function avancarFrase(){
 function voltarFrase(){
   if(estado.fraseIdx > 0){ irParaFrase(estado.fraseIdx - 1); return; }
   const ant = proximoCapIncluido(-1);
-  if(ant >= 0){
-    trocarCapitulo(ant, -1);
-  }
+  if(ant >= 0) trocarCapitulo(ant, -1);
 }
 
+/* Avanço automático: caminho direto, sem passar por tocar() (evita prime iOS
+   redundante e a janela de race que causava a pausa entre capítulos). */
 function avancarCapituloAuto(){
   const prox = proximoCapIncluido(1);
-  if(prox >= 0){
-    trocarCapitulo(prox, 0);
-  } else {
+  if(prox < 0){
     pausar();
     $('estrada-frase').textContent = 'Fim do livro. Boa estrada!';
+    return;
   }
+  // parar motor atual sem tocar em estado.tocando
+  _pausaProg = true;
+  estado.modoAudio = false;
+  audioEl.pause();
+  _pausaProg = false;
+  falaSistema.parar();
+  // preparar novo capítulo
+  estado.capIdx = prox;
+  $('sel-capitulo').value = prox;
+  prepararCapitulo();
+  estado.fraseIdx = 0;
+  marcarFrase();
+  agendarGeracao();
+  salvarProgressoAgora();
+  // continuar leitura diretamente
+  _iniciarCapitulo();
 }
 
+/* Troca manual de capítulo (seletor, botões cap ant/prox). */
 function trocarCapitulo(novoIdx, posFrase){
+  const estavaTocando = estado.tocando;
+  _pausaProg = true;
   estado.modoAudio = false;
-  _pausaProg = true; audioEl.pause(); _pausaProg = false;
+  audioEl.pause();
+  _pausaProg = false;
   falaSistema.parar();
   estado.capIdx = novoIdx;
   $('sel-capitulo').value = novoIdx;
@@ -586,7 +627,7 @@ function trocarCapitulo(novoIdx, posFrase){
   estado.fraseIdx = posFrase < 0 ? Math.max(0, estado.frases.length - 1) : 0;
   marcarFrase();
   agendarGeracao();
-  if(estado.tocando) tocar();
+  if(estavaTocando) tocar();
   salvarProgressoAgora();
 }
 
@@ -612,15 +653,27 @@ async function atualizarEstadoAudioUI(ev){
   const el = $('estado-audio');
   if(!el) return;
   if(estado.motor !== 'piper' || !piper.disponivel){ el.textContent = ''; return; }
-  if(!estado.vozPiperPronta){ el.textContent = 'Voz neural ainda não baixada — usando a voz do sistema.'; return; }
-  if(ev && ev.capIdx === estado.capIdx){
-    if(ev.estado === 'gerando') el.textContent = `Gerando áudio natural: frase ${ev.feito} de ${ev.total}…`;
-    else if(ev.estado === 'pronto') el.textContent = 'Áudio natural pronto para este capítulo.';
-    else if(ev.estado === 'erro') el.textContent = 'Falha ao gerar áudio — usando a voz do sistema. ' + (ev.erro || '');
+  if(!estado.vozPiperPronta){
+    el.textContent = 'Voz neural ainda não baixada — usando a voz do sistema.';
     return;
   }
+  // A voz (modelo) já está baixada e funciona offline.
+  // O que pode demorar é a GERAÇÃO do áudio (texto → fala) para este capítulo.
+  if(ev && ev.capIdx === estado.capIdx){
+    if(ev.estado === 'gerando'){
+      el.textContent = `Convertendo texto em fala: frase ${ev.feito} de ${ev.total}… (a voz já está salva no aparelho)`;
+    } else if(ev.estado === 'pronto'){
+      el.textContent = 'Áudio natural pronto ✓';
+    } else if(ev.estado === 'erro'){
+      el.textContent = 'Falha ao gerar áudio — usando a voz do sistema. ' + (ev.erro || '');
+    }
+    return;
+  }
+  if(!estado.livro) return;
   const reg = await bd.obter('capAudio', gerador.chaveCap(estado.livro.id, estado.capIdx));
-  el.textContent = reg ? 'Áudio natural pronto para este capítulo.' : 'Preparando áudio natural deste capítulo…';
+  el.textContent = reg
+    ? 'Áudio natural pronto ✓'
+    : 'Preparando áudio deste capítulo… (a voz já está salva no aparelho)';
 }
 
 /* =====================================================================
@@ -747,26 +800,38 @@ function preencherVozesSistema(){
   });
 }
 
+// Cache local de vozes baixadas nesta sessão — evita consultas ao OPFS/worker
+// que podem travar quando o worker está gerando áudio.
+const _vozesBaixadas = new Set();
+let _listaVozesCache = null; // cache da lista de vozes do worker
+
 async function preencherVozesPiper(){
   const sel = $('sel-voz-piper');
   sel.innerHTML = '';
   if(!piper.disponivel){ $('painel-piper').classList.add('oculto'); return; }
-  let lista = [];
-  try{ lista = await piper.vozes(); }catch{}
-  let baixadas = [];
-  try{ baixadas = await piper.armazenadas(); }catch{}
+  // Usar cache da lista se disponível; o worker pode estar ocupado gerando áudio
+  let lista = _listaVozesCache;
+  if(!lista){
+    try{ lista = await piper.vozes(); _listaVozesCache = lista; }catch{ lista = []; }
+  }
+  // Só consultar armazenadas se o cache local não cobre a voz atual
+  if(!_vozesBaixadas.has(piper.vozId)){
+    try{
+      const armazenadas = await piper.armazenadas();
+      for(const id of armazenadas) _vozesBaixadas.add(id);
+    }catch{}
+  }
   for(const v of lista){
     const o = document.createElement('option');
     o.value = v.id;
-    o.textContent = `${v.nome}${baixadas.includes(v.id) ? ' ✓ baixada' : ''}`;
+    o.textContent = `${v.nome}${_vozesBaixadas.has(v.id) ? ' ✓ baixada' : ''}`;
     if(v.id === piper.vozId) o.selected = true;
     sel.appendChild(o);
   }
-  // Se já sabemos que acabou de baixar, não deixar armazenadas() sobrescrever
-  if(!estado.vozPiperPronta) estado.vozPiperPronta = baixadas.includes(piper.vozId);
+  estado.vozPiperPronta = _vozesBaixadas.has(piper.vozId);
   const btn = $('btn-baixar-voz');
   btn.classList.toggle('oculto', estado.vozPiperPronta);
-  btn.disabled = false; // garantir que fique clicável ao trocar de voz
+  btn.disabled = false;
   $('voz-piper-ok').classList.toggle('oculto', !estado.vozPiperPronta);
   atualizarEstadoAudioUI();
 }
@@ -777,14 +842,13 @@ async function baixarVozPiper(){
   const prog = $('prog-download-voz');
   prog.classList.remove('oculto');
   piper.aoProgressoDownload = (m) => {
-    if(m.total) prog.textContent = `Baixando voz: ${Math.round(m.carregado * 100 / m.total)}% (${Math.round(m.total / 1048576)} MB, uma vez só)`;
+    if(m.total) prog.textContent = `Baixando modelo de voz: ${Math.round(m.carregado * 100 / m.total)}% (${Math.round(m.total / 1048576)} MB — só uma vez, depois funciona offline)`;
   };
   try{
     await piper.baixar(piper.vozId);
+    _vozesBaixadas.add(piper.vozId);
     estado.vozPiperPronta = true;
-    prog.textContent = 'Voz baixada. A partir de agora, tudo funciona offline.';
-    // atualizar UI direto — não chamar preencherVozesPiper() porque armazenadas()
-    // pode retornar lista vazia por race condition com OPFS no iOS
+    prog.textContent = 'Voz baixada ✓ Agora funciona 100% offline.';
     btn.classList.add('oculto');
     $('voz-piper-ok').classList.remove('oculto');
     const opt = $('sel-voz-piper').querySelector(`option[value="${piper.vozId}"]`);
@@ -838,25 +902,31 @@ function ligarEventos(){
   $('faixa-velocidade').addEventListener('input', (e) => aplicarTaxa(Number(e.target.value)));
   $('sel-dormir').addEventListener('change', (e) => armarTimerDormir(Number(e.target.value)));
 
-  $('sel-motor').addEventListener('change', (e) => {
+  $('sel-motor').addEventListener('change', async (e) => {
+    const estavaTocando = estado.tocando;
+    if(estavaTocando) pausar();
     estado.motor = e.target.value;
     bd.salvar('config', {chave: 'motor', valor: estado.motor});
     $('painel-piper').classList.toggle('oculto', estado.motor !== 'piper' || !piper.disponivel);
     $('painel-sistema').classList.toggle('oculto', estado.motor !== 'sistema');
-    if(estado.tocando){ pausar(); tocar(); }
     atualizarEstadoAudioUI();
     agendarGeracao();
+    if(estavaTocando) tocar();
   });
   $('sel-voz-piper').addEventListener('change', async (e) => {
     const estavaTocando = estado.tocando;
     if(estavaTocando) pausar();
     piper.vozId = e.target.value;
-    estado.vozPiperPronta = false; // nova voz: verificar se já está baixada
     bd.salvar('config', {chave: 'vozPiper', valor: piper.vozId});
+    // A voz já está baixada? Verificar no cache local (instantâneo)
+    estado.vozPiperPronta = _vozesBaixadas.has(piper.vozId);
+    // Limpar áudio gerado com a voz anterior
     if(estado.livro){
       gerador.cancelarLivro(estado.livro.id);
-      await gerador.apagarAudioLivro(estado.livro.id);
+      // apagarAudioLivro é I/O — não esperar se o worker está ocupado
+      gerador.apagarAudioLivro(estado.livro.id).catch(() => {});
     }
+    // Atualizar UI (usa cache local, sem travar no worker)
     await preencherVozesPiper();
     agendarGeracao();
     if(estavaTocando) tocar();
