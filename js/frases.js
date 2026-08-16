@@ -51,7 +51,11 @@ function frasesDoCapitulo(cap){
     if(ehParagrafoTitulo(p)){
       frases.push({texto: p, falado: tituloFalado(p), par: iPar, titulo: true});
     } else {
-      for(const f of dividirFrases(p)) frases.push({texto: f, falado: f, par: iPar, titulo: false});
+      for(const f of dividirFrases(p)){
+        // Se uma frase começa com numeração de seção (1.2, 1.2.3, etc.), tirar da fala
+        const falado = /^\s*\d+(?:\.\d+)+\.?\s/.test(f) ? tituloFalado(f) : f;
+        frases.push({texto: f, falado, par: iPar, titulo: false});
+      }
     }
   });
   return frases.length ? frases : [{texto: cap.texto, falado: cap.texto, par: 0, titulo: false}];

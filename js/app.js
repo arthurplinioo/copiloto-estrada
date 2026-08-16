@@ -760,8 +760,11 @@ async function preencherVozesPiper(){
     if(v.id === piper.vozId) o.selected = true;
     sel.appendChild(o);
   }
-  estado.vozPiperPronta = baixadas.includes(piper.vozId);
-  $('btn-baixar-voz').classList.toggle('oculto', estado.vozPiperPronta);
+  // Se já sabemos que acabou de baixar, não deixar armazenadas() sobrescrever
+  if(!estado.vozPiperPronta) estado.vozPiperPronta = baixadas.includes(piper.vozId);
+  const btn = $('btn-baixar-voz');
+  btn.classList.toggle('oculto', estado.vozPiperPronta);
+  btn.disabled = false; // garantir que fique clicável ao trocar de voz
   $('voz-piper-ok').classList.toggle('oculto', !estado.vozPiperPronta);
   atualizarEstadoAudioUI();
 }
@@ -778,7 +781,13 @@ async function baixarVozPiper(){
     await piper.baixar(piper.vozId);
     estado.vozPiperPronta = true;
     prog.textContent = 'Voz baixada. A partir de agora, tudo funciona offline.';
-    await preencherVozesPiper();
+    // atualizar UI direto — não chamar preencherVozesPiper() porque armazenadas()
+    // pode retornar lista vazia por race condition com OPFS no iOS
+    btn.classList.add('oculto');
+    $('voz-piper-ok').classList.remove('oculto');
+    const opt = $('sel-voz-piper').querySelector(`option[value="${piper.vozId}"]`);
+    if(opt && !opt.textContent.includes('✓')) opt.textContent += ' ✓ baixada';
+    atualizarEstadoAudioUI();
     agendarGeracao();
   }catch(err){
     prog.textContent = 'Falha no download: ' + (err?.message || err) + ' — verifique a conexão e tente de novo.';
@@ -838,6 +847,7 @@ function ligarEventos(){
   });
   $('sel-voz-piper').addEventListener('change', async (e) => {
     piper.vozId = e.target.value;
+    estado.vozPiperPronta = false; // nova voz: verificar se já está baixada
     bd.salvar('config', {chave: 'vozPiper', valor: piper.vozId});
     if(estado.livro){
       gerador.cancelarLivro(estado.livro.id);

@@ -120,10 +120,17 @@ function regraParagrafos(texto){
     const t = bruta.trim();
     if(!t){ if(atual){ paragrafos.push(atual); atual = ''; } continue; }
     if(!atual){ atual = t; continue; }
-    const terminou = /[.!?…:;»”"]\s*$/.test(atual);
-    const comecaNova = /^[\p{Lu}0-9«"“¿¡—–]/u.test(t);
-    if(terminou && comecaNova){ paragrafos.push(atual); atual = t; }
-    else { atual += ' ' + t; juntas++; }
+    // Linha com cara de cabeçalho de seção: nunca grudar no parágrafo anterior
+    const ehCabecalhoSecao = /^\d+(?:\.\d+)+\.?\s+\S/.test(t) && contarPalavras(t) <= 12 && t.length <= 90;
+    // Linha anterior com cara de cabeçalho: não grudar a próxima nela
+    const atualEhCabecalho = /^\d+(?:\.\d+)+\.?\s+\S/.test(atual) && contarPalavras(atual) <= 12 && atual.length <= 90;
+    const terminou = /[.!?…:;»””]\s*$/.test(atual);
+    const comecaNova = /^[\p{Lu}0-9«””¿¡—–]/u.test(t);
+    if(ehCabecalhoSecao || atualEhCabecalho || (terminou && comecaNova)){
+      paragrafos.push(atual); atual = t;
+    } else {
+      atual += ' ' + t; juntas++;
+    }
   }
   if(atual) paragrafos.push(atual);
   return {resultado: paragrafos.join('\n\n'), removidos: juntas};
@@ -148,7 +155,9 @@ function detectarCapitulosTexto(texto){
     const t = p.trim();
     if(!t) continue;
     const ehTitulo = t.length <= 70 && !/[.!?…]$/.test(t) &&
-      (RE_TITULO.test(t) || /^[IVXLCDM]{1,7}$/.test(t) || (t === t.toUpperCase() && /\p{Lu}/u.test(t) && t.length >= 3 && contarPalavras(t) <= 8));
+      (RE_TITULO.test(t) || /^[IVXLCDM]{1,7}$/.test(t) ||
+       (/^\d+(?:\.\d+)*\.?\s+\S/.test(t) && contarPalavras(t) <= 12) ||
+       (t === t.toUpperCase() && /\p{Lu}/u.test(t) && t.length >= 3 && contarPalavras(t) <= 8));
     if(ehTitulo && atual.pars.length){
       capitulos.push(atual);
       atual = {titulo: t, pars: []};
@@ -187,7 +196,7 @@ function dividirPorTamanho(texto){
    Sumário, ficha catalográfica, créditos, referências etc. são marcados
    como não-lidos por padrão (o usuário pode reincluir na tela de preparo).
    ===================================================================== */
-const RE_TITULO_DESCARTE = /^(sum[áa]rio|[íi]ndice(\s|$)|ficha\s+catalogr|cataloga[çc][ãa]o|copyright|cr[ée]ditos|expediente|folha\s+de\s+rosto|refer[êe]ncias?(\s+bibliogr[áa]ficas?)?$|bibliografia$|notas?$|gloss[áa]rio|agradecimentos?|dedicat[óo]ria|sobre\s+(o|a)\s+autor|colof[ãa]o|errata|cr[ée]ditos\s+da\s+edi[çc][ãa]o|equipe\s+editorial)/i;
+const RE_TITULO_DESCARTE = /^(sum[áa]rio|[íi]ndice(\s|$)|ficha\s+catalogr|cataloga[çc][ãa]o|copyright|cr[ée]ditos|expediente|folha\s+de\s+rosto|refer[êe]ncias?(\s+bibliogr[áa]ficas?)?$|bibliografia$|notas?$|gloss[áa]rio|agradecimentos?|dedicat[óo]ria|sobre\s+(o|a)\s+autor|colof[ãa]o|errata|cr[ée]ditos\s+da\s+edi[çc][ãa]o|equipe\s+editorial|lista\s+de\s+(figuras?|tabelas?|quadros?|siglas?|abrevia)|ap[êe]ndice|anexo)/i;
 
 function classificarCapitulo(cap){
   const titulo = (cap.titulo || '').trim();
@@ -200,8 +209,8 @@ function classificarCapitulo(cap){
   const pars = texto.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
 
   // sumário: muitas linhas curtas terminando em número de página
-  const linhasToc = pars.filter(p => p.length <= 120 && (/[.·…]{2,}\s*\d{1,4}$/.test(p) || /\s\d{1,4}$/.test(p)));
-  if(pars.length >= 6 && linhasToc.length / pars.length >= 0.5) return {incluir: false, motivo: 'sumário'};
+  const linhasToc = pars.filter(p => p.length <= 120 && (/[.·…]{2,}\s*\d{1,4}$/.test(p) || /\s{2,}\d{1,4}$/.test(p) || /\t\d{1,4}$/.test(p)));
+  if(pars.length >= 4 && linhasToc.length / pars.length >= 0.4) return {incluir: false, motivo: 'sumário'};
 
   // ficha catalográfica / página de direitos
   const marcasFicha = (texto.match(/ISBN|CIP\b|CDD\b|CDU\b|cataloga[çc][ãa]o|todos os direitos|direitos reservados|impresso no brasil|dep[óo]sito legal|\d+ª\s+edi[çc][ãa]o|conselho editorial/gi) || []).length;
@@ -249,7 +258,9 @@ function executarLimpeza(bruto, regras){
     const linhasTexto = [];
     for(const pag of paginas){
       for(const l of pag.linhas){
-        const ehTitulo = l.tam >= corpo * 1.35 && contarPalavras(l.texto) <= 12 && l.texto.length <= 90;
+        const fonteGrande = l.tam >= corpo * 1.35 && contarPalavras(l.texto) <= 12 && l.texto.length <= 90;
+        const secaoNumerada = /^\d+(?:\.\d+)*\.?\s+\S/.test(l.texto) && contarPalavras(l.texto) <= 12 && l.texto.length <= 90 && !/[.!?…]$/.test(l.texto);
+        const ehTitulo = fonteGrande || secaoNumerada;
         linhasTexto.push(ehTitulo ? `\n\n${l.texto}\n\n` : l.texto);
       }
       linhasTexto.push('');
