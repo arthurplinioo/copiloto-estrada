@@ -1,0 +1,3 @@
+# Sem conversão de fim de linha: preserva bytes exatos (PDF/EPUB de teste,
+# bundles vendorados) e evita divergência entre Windows e o Pages.
+* -text

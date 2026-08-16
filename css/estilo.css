@@ -1,0 +1,208 @@
+/* Copiloto de Estrada — identidade: painel noturno de carro.
+   Âmbar de farol sobre asfalto azulado; serifa humanista para títulos de livro. */
+
+:root{
+  --fundo:#F6F3EC;
+  --superficie:#FFFFFF;
+  --superficie-2:#EFEBE1;
+  --tinta:#27221A;
+  --tinta-2:#6F6757;
+  --linha:#E1DCCE;
+  --destaque:#A85F0D;
+  --destaque-tinta:#FFF9EF;
+  --ok:#3A7134;
+  --erro:#A93A2F;
+  --realce:#F3E3C8;
+  --sombra:0 1px 3px rgba(30,25,15,.08), 0 6px 20px rgba(30,25,15,.06);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --fundo:#14161B;
+    --superficie:#1C1F26;
+    --superficie-2:#23272F;
+    --tinta:#ECE8DE;
+    --tinta-2:#9B958A;
+    --linha:#2C3039;
+    --destaque:#E8A13D;
+    --destaque-tinta:#1B1305;
+    --ok:#72BE69;
+    --erro:#E06B5F;
+    --realce:#3A3524;
+    --sombra:0 1px 3px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+  }
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--fundo);
+  color:var(--tinta);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+  line-height:1.55;
+  min-height:100dvh;
+  -webkit-text-size-adjust:100%;
+}
+main{max-width:42rem;margin:0 auto;padding:1rem 1rem 4rem}
+h1,h2,h3{text-wrap:balance;line-height:1.2;margin:0}
+button{font:inherit;color:inherit;cursor:pointer;border:none;background:none;-webkit-tap-highlight-color:transparent}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--destaque);outline-offset:2px}
+select,input[type=text]{font:inherit;color:var(--tinta);background:var(--superficie);border:1px solid var(--linha);border-radius:8px;padding:.5rem .6rem;max-width:100%;min-height:44px}
+.oculto{display:none !important}
+.num{font-variant-numeric:tabular-nums}
+.serif{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif}
+
+.topo{display:flex;align-items:baseline;gap:.6rem;padding:1.2rem 0 .9rem;flex-wrap:wrap}
+.topo h1{font-size:1.35rem;font-weight:800;letter-spacing:-.01em}
+.topo .sub{color:var(--tinta-2);font-size:.85rem}
+.rotulo{font-size:.72rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--tinta-2)}
+
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:.5rem;
+  min-height:44px;padding:.55rem 1.1rem;border-radius:10px;
+  background:var(--superficie);border:1px solid var(--linha);font-weight:600;
+}
+.btn:active{transform:translateY(1px)}
+.btn-primario{background:var(--destaque);border-color:var(--destaque);color:var(--destaque-tinta)}
+.btn-quieto{border-color:transparent;background:transparent;color:var(--tinta-2)}
+.btn[disabled]{opacity:.45;cursor:default}
+
+/* ===== Biblioteca ===== */
+.zona-envio{
+  border:2px dashed var(--linha);border-radius:16px;background:var(--superficie);
+  padding:1.6rem 1.2rem;text-align:center;display:flex;flex-direction:column;gap:.6rem;align-items:center;
+}
+.zona-envio.arrastando{border-color:var(--destaque);background:var(--superficie-2)}
+.zona-envio p{margin:0;color:var(--tinta-2);font-size:.9rem;max-width:32rem}
+.vazio{color:var(--tinta-2);text-align:center;padding:2rem 0}
+
+.lista-livros{list-style:none;margin:1.2rem 0 0;padding:0;display:flex;flex-direction:column;gap:.9rem}
+.cartao-livro{
+  background:var(--superficie);border:1px solid var(--linha);border-radius:16px;
+  padding:.9rem;display:flex;gap:1rem;box-shadow:var(--sombra);
+}
+.capa{
+  width:84px;aspect-ratio:2/3;border-radius:8px;overflow:hidden;flex-shrink:0;
+  display:flex;align-items:flex-end;box-shadow:inset 0 0 0 1px rgba(0,0,0,.15);
+  position:relative;background:var(--superficie-2);
+}
+.capa img{width:100%;height:100%;object-fit:cover;display:block}
+.capa span{
+  font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+  color:#F2EEE4;font-size:.72rem;line-height:1.25;padding:.5rem .45rem;
+  display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden;
+}
+.capa-mini{width:44px;border-radius:6px}
+.capa-mini span{font-size:.5rem;padding:.25rem;-webkit-line-clamp:4}
+.cartao-livro .info{flex:1;min-width:0;display:flex;flex-direction:column;gap:.3rem}
+.cartao-livro .titulo{
+  font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+  font-weight:700;font-size:1.06rem;line-height:1.25;
+}
+.cartao-livro .autor{color:var(--tinta-2);font-size:.85rem}
+.cartao-livro .meta{color:var(--tinta-2);font-size:.8rem;display:flex;gap:.7rem;flex-wrap:wrap;align-items:center}
+.selo{font-size:.68rem;font-weight:700;letter-spacing:.05em;padding:.12rem .5rem;border-radius:999px;background:var(--superficie-2);color:var(--tinta-2);text-transform:uppercase}
+.barra-prog{height:4px;border-radius:2px;background:var(--superficie-2);overflow:hidden}
+.barra-prog i{display:block;height:100%;background:var(--destaque)}
+.acoes-livro{display:flex;gap:.5rem;margin-top:.2rem}
+
+.painel{background:var(--superficie);border:1px solid var(--linha);border-radius:16px;padding:1rem 1.1rem;margin-top:1rem;box-shadow:var(--sombra)}
+.painel + .painel{margin-top:.8rem}
+.continuar{display:flex;align-items:center;gap:1rem}
+.cont-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:.15rem}
+.cont-info b{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.meta-cont{color:var(--tinta-2);font-size:.85rem}
+
+/* ===== Preparo ===== */
+.linha-campo{display:flex;flex-direction:column;gap:.35rem;margin-top:.8rem}
+.linha-campo:first-child{margin-top:0}
+.grade-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(6.8rem,1fr));gap:.6rem;margin-top:.8rem}
+.stat{background:var(--superficie-2);border-radius:10px;padding:.6rem .7rem}
+.stat b{display:block;font-size:1.15rem;font-variant-numeric:tabular-nums}
+.stat span{font-size:.75rem;color:var(--tinta-2)}
+.regra{display:flex;align-items:flex-start;gap:.7rem;padding:.65rem 0;border-top:1px solid var(--linha)}
+.regra:first-of-type{border-top:none;margin-top:.4rem}
+.regra label{flex:1;cursor:pointer}
+.regra .desc,.desc{color:var(--tinta-2);font-size:.83rem}
+.regra .qtd{font-variant-numeric:tabular-nums;color:var(--destaque);font-weight:700;font-size:.85rem;white-space:nowrap}
+.regra input,.cap-item input{width:22px;height:22px;margin-top:.15rem;accent-color:var(--destaque);flex-shrink:0}
+.lista-capitulos{max-height:16rem;overflow-y:auto;margin-top:.5rem}
+.cap-item{display:flex;gap:.7rem;padding:.45rem 0;border-top:1px solid var(--linha);align-items:flex-start}
+.cap-item:first-child{border-top:none}
+.cap-item label{flex:1;cursor:pointer;min-width:0}
+.cap-item .cap-titulo{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cap-item .cap-meta{color:var(--tinta-2);font-size:.78rem}
+.cap-item.pulado .cap-titulo{color:var(--tinta-2);text-decoration:line-through}
+.amostra{
+  background:var(--superficie-2);border-radius:10px;padding:.9rem 1rem;margin-top:.8rem;
+  max-height:16rem;overflow-y:auto;font-size:.92rem;white-space:pre-wrap;line-height:1.6;
+}
+.acoes{display:flex;gap:.7rem;margin-top:1rem;flex-wrap:wrap}
+.progresso-parse{display:flex;align-items:center;gap:.8rem;margin-top:1rem}
+.progresso-parse progress{flex:1;accent-color:var(--destaque)}
+
+/* ===== Player ===== */
+.cab-player{display:flex;align-items:center;gap:.7rem;padding:.9rem 0 .4rem}
+.cab-player .voltar{min-width:44px;min-height:44px;border-radius:10px;background:var(--superficie);border:1px solid var(--linha)}
+.cab-player .titulo-livro{
+  flex:1;min-width:0;font-weight:700;font-size:1.02rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+}
+.sel-capitulo{width:100%;margin-top:.4rem}
+.estado-audio{color:var(--tinta-2);font-size:.8rem;margin-top:.35rem;min-height:1.1em}
+.texto-leitura{
+  background:var(--superficie);border:1px solid var(--linha);border-radius:16px;
+  padding:1.1rem 1.15rem;margin-top:.6rem;font-size:1.02rem;line-height:1.7;
+  max-height:44dvh;overflow-y:auto;box-shadow:var(--sombra);
+}
+.texto-leitura p{margin:0 0 .9em}
+.texto-leitura h3{font-size:1.05rem;margin:.4em 0 .7em}
+.texto-leitura .frase{cursor:pointer;border-radius:4px}
+.texto-leitura .frase.atual{background:var(--realce);box-shadow:0 0 0 3px var(--realce)}
+.controles{
+  position:sticky;bottom:0;background:var(--fundo);
+  padding:.8rem 0 max(.8rem, env(safe-area-inset-bottom));
+  display:flex;flex-direction:column;gap:.65rem;
+}
+.linha-controles{display:flex;align-items:center;justify-content:center;gap:.8rem}
+.ctl{
+  min-width:56px;min-height:56px;border-radius:50%;
+  background:var(--superficie);border:1px solid var(--linha);
+  display:inline-flex;align-items:center;justify-content:center;font-size:1.15rem;font-weight:700;
+}
+.ctl-play{min-width:76px;min-height:76px;background:var(--destaque);border-color:var(--destaque);color:var(--destaque-tinta);font-size:1.7rem;box-shadow:var(--sombra)}
+.linha-ajustes{display:flex;align-items:center;gap:.7rem;justify-content:center;flex-wrap:wrap;font-size:.88rem;color:var(--tinta-2)}
+.faixa-vel{display:flex;align-items:center;gap:.45rem}
+.faixa-vel input{accent-color:var(--destaque);width:7.5rem}
+.ok{color:var(--ok);font-size:.85rem;display:block;margin-top:.5rem}
+#painel-piper .btn{margin-top:.6rem}
+#prog-download-voz{color:var(--tinta-2);font-size:.85rem;margin-top:.4rem}
+
+.aviso{border-radius:12px;padding:.8rem 1rem;font-size:.9rem;margin-top:.9rem;background:var(--superficie-2);border:1px solid var(--linha)}
+.aviso-erro{border-color:var(--erro);color:var(--erro)}
+
+/* ===== Modo Estrada (sempre escuro: uso noturno no carro) ===== */
+.estrada{
+  position:fixed;inset:0;z-index:50;background:#0D0F13;color:#F2EEE4;
+  display:flex;flex-direction:column;padding:max(1rem, env(safe-area-inset-top)) 1rem max(1.2rem, env(safe-area-inset-bottom));
+}
+.estrada .cab{display:flex;align-items:center;justify-content:space-between;gap:.8rem}
+.estrada .sair{min-width:88px;min-height:88px;border-radius:16px;background:#1D2027;color:#F2EEE4;font-size:1rem;font-weight:700}
+.estrada .cap-info{text-align:right;color:#9B958A;font-size:.95rem;font-variant-numeric:tabular-nums}
+.estrada .frase-grande{
+  flex:1;display:flex;align-items:center;justify-content:center;text-align:center;
+  font-size:clamp(1.4rem, 5.5vw, 2.1rem);line-height:1.45;font-weight:600;
+  padding:1rem .4rem;overflow:hidden;
+}
+.estrada .grade-ctl{display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:.8rem}
+.estrada .gc{
+  min-height:88px;border-radius:18px;background:#1D2027;color:#F2EEE4;
+  font-size:1.5rem;font-weight:800;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.1rem;
+}
+.estrada .gc small{font-size:.72rem;font-weight:600;color:#9B958A;letter-spacing:.06em;text-transform:uppercase}
+.estrada .gc-play{background:#E8A13D;color:#1B1305;font-size:2.4rem;min-height:120px}
+.estrada .barra-cap{height:6px;border-radius:3px;background:#23272F;margin:.9rem 0 .8rem;overflow:hidden}
+.estrada .barra-cap i{display:block;height:100%;background:#E8A13D}
+
+@media (prefers-reduced-motion: reduce){
+  *{transition:none !important;animation:none !important}
+}

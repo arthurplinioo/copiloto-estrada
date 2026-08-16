@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Copiloto de Estrada</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Leitor de livros em voz alta: envie PDF, EPUB ou TXT, limpe o texto e ouça na estrada — offline, com voz neural local.">
+<meta name="theme-color" content="#14161B">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icones/icone-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Copiloto">
+<link rel="stylesheet" href="css/estilo.css">
+</head>
+<body>
+
+<main>
+  <!-- ===== Tela: Biblioteca ===== -->
+  <section id="tela-biblioteca">
+    <header class="topo">
+      <h1>Copiloto de Estrada</h1>
+      <span class="sub">seus livros, lidos em voz alta</span>
+    </header>
+
+    <div class="zona-envio" id="zona-envio">
+      <span class="rotulo">Adicionar livro</span>
+      <p>PDF, EPUB ou TXT. O texto é limpo — cabeçalhos, números de página, sumário e ficha catalográfica ficam de fora da leitura.</p>
+      <button class="btn btn-primario" id="btn-escolher">Escolher arquivo</button>
+      <input type="file" id="entrada-arquivo" accept=".pdf,.epub,.txt,application/pdf,application/epub+zip,text/plain" class="oculto">
+    </div>
+
+    <div id="continuar-card"></div>
+    <div id="aviso-armazenamento"></div>
+
+    <p id="biblioteca-vazia" class="vazio oculto">Sua estante está vazia. Envie o primeiro livro acima.</p>
+    <ul class="lista-livros" id="lista-livros"></ul>
+  </section>
+
+  <!-- ===== Tela: Preparo ===== -->
+  <section id="tela-preparo" class="oculto">
+    <header class="topo">
+      <h1>Preparar leitura</h1>
+    </header>
+
+    <div id="parse-andamento" class="painel oculto">
+      <span class="rotulo" id="parse-etapa">Lendo arquivo…</span>
+      <div class="progresso-parse">
+        <progress id="parse-barra" max="100" value="0"></progress>
+        <span id="parse-pct" class="num">0%</span>
+      </div>
+    </div>
+
+    <div id="preparo-conteudo" class="oculto">
+      <div class="painel">
+        <div class="linha-campo">
+          <label class="rotulo" for="campo-titulo">Título</label>
+          <input type="text" id="campo-titulo">
+        </div>
+        <div class="grade-stats" id="grade-stats"></div>
+      </div>
+
+      <div class="painel">
+        <span class="rotulo">Limpeza do texto</span>
+        <div id="lista-regras"></div>
+      </div>
+
+      <div class="painel">
+        <span class="rotulo">O que será lido — desmarque o que não interessa</span>
+        <div id="lista-capitulos" class="lista-capitulos"></div>
+      </div>
+
+      <div class="painel">
+        <span class="rotulo">Amostra do texto limpo — confira antes de salvar</span>
+        <div class="amostra" id="amostra-texto"></div>
+      </div>
+
+      <div class="acoes">
+        <button class="btn btn-primario" id="btn-salvar-livro">Salvar na estante</button>
+        <button class="btn" id="btn-cancelar-preparo">Cancelar</button>
+      </div>
+    </div>
+    <div id="preparo-erro"></div>
+  </section>
+
+  <!-- ===== Tela: Player ===== -->
+  <section id="tela-player" class="oculto">
+    <header class="cab-player">
+      <button class="voltar" id="btn-voltar-biblioteca" aria-label="Voltar à estante">←</button>
+      <div id="player-capa"></div>
+      <div class="titulo-livro" id="player-titulo"></div>
+      <button class="btn" id="btn-modo-estrada">Estrada</button>
+    </header>
+
+    <select class="sel-capitulo" id="sel-capitulo" aria-label="Capítulo"></select>
+    <div class="estado-audio" id="estado-audio"></div>
+
+    <div class="texto-leitura" id="texto-leitura"></div>
+
+    <div class="controles">
+      <div class="linha-controles">
+        <button class="ctl" id="btn-cap-ant" aria-label="Capítulo anterior">⇤</button>
+        <button class="ctl" id="btn-frase-ant" aria-label="Frase anterior">‹</button>
+        <button class="ctl ctl-play" id="btn-play" aria-label="Tocar ou pausar">▶</button>
+        <button class="ctl" id="btn-frase-prox" aria-label="Próxima frase">›</button>
+        <button class="ctl" id="btn-cap-prox" aria-label="Próximo capítulo">⇥</button>
+      </div>
+      <div class="linha-ajustes">
+        <span class="faixa-vel">
+          <span>Vel.</span>
+          <input type="range" id="faixa-velocidade" min="0.6" max="2" step="0.1" value="1" aria-label="Velocidade">
+          <b id="vel-valor" class="num">1,0×</b>
+        </span>
+        <select id="sel-dormir" aria-label="Timer para dormir">
+          <option value="0">Sem timer</option>
+          <option value="15">Parar em 15 min</option>
+          <option value="30">Parar em 30 min</option>
+          <option value="60">Parar em 60 min</option>
+        </select>
+        <button class="btn" id="btn-config-voz">Voz</button>
+        <span class="num" id="tempo-restante"></span>
+      </div>
+
+      <div class="painel oculto" id="painel-voz">
+        <div class="linha-campo">
+          <label class="rotulo" for="sel-motor">Motor de leitura</label>
+          <select id="sel-motor">
+            <option value="piper" id="opcao-piper">Neural (Piper) — voz natural brasileira, offline</option>
+            <option value="sistema">Sistema — imediata, sem download</option>
+          </select>
+        </div>
+        <div id="painel-piper">
+          <div class="linha-campo">
+            <label class="rotulo" for="sel-voz-piper">Voz neural</label>
+            <select id="sel-voz-piper"></select>
+          </div>
+          <button class="btn btn-primario" id="btn-baixar-voz">Baixar esta voz (uma vez só)</button>
+          <span class="ok oculto" id="voz-piper-ok">✓ Voz pronta — o áudio segue tocando com a tela apagada e aparece no CarPlay.</span>
+          <div class="num" id="prog-download-voz"></div>
+        </div>
+        <div id="painel-sistema">
+          <div class="linha-campo">
+            <label class="rotulo" for="sel-voz-sistema">Voz do sistema</label>
+            <select id="sel-voz-sistema"></select>
+          </div>
+          <p class="desc">Dica no iPhone: em Ajustes → Acessibilidade → Conteúdo Falado → Vozes → Português, baixe a "Luciana (Aprimorada)" — melhora muito e continua offline.</p>
+        </div>
+      </div>
+
+      <div class="aviso oculto" id="aviso-ios">
+        Com a voz do sistema, a leitura pausa quando a tela bloqueia. Baixe a voz neural (botão "Voz") para ouvir com a tela apagada.
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ===== Modo Estrada ===== -->
+<div class="estrada oculto" id="modo-estrada">
+  <div class="cab">
+    <button class="sair" id="btn-sair-estrada">Sair</button>
+    <div class="cap-info" id="estrada-cap-info"></div>
+  </div>
+  <div class="frase-grande" id="estrada-frase"></div>
+  <div class="barra-cap"><i id="estrada-barra" style="width:0%"></i></div>
+  <div class="grade-ctl">
+    <button class="gc" id="estrada-ant">‹<small>frase</small></button>
+    <button class="gc gc-play" id="estrada-play">▶</button>
+    <button class="gc" id="estrada-prox">›<small>frase</small></button>
+  </div>
+  <div class="grade-ctl" style="margin-top:.8rem">
+    <button class="gc" id="estrada-cap-ant">⇤<small>capítulo</small></button>
+    <button class="gc" id="estrada-vel">1,0×<small>velocidade</small></button>
+    <button class="gc" id="estrada-cap-prox">⇥<small>capítulo</small></button>
+  </div>
+</div>
+
+<script src="vendor/pdf.min.js"></script>
+<script src="js/bd.js"></script>
+<script src="js/limpeza.js"></script>
+<script src="js/frases.js"></script>
+<script src="js/importadores.js"></script>
+<script src="js/fala-sistema.js"></script>
+<script src="js/motor-piper.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
