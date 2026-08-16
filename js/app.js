@@ -425,7 +425,7 @@ function atualizarIconePlay(){
 
 /* ---------- via Piper (arquivo de áudio) ---------- */
 async function tentarModoAudio(){
-  if(estado.motor !== 'piper' || !piper.disponivel || !estado.vozPiperPronta) return false;
+  if(estado.motor !== 'piper' || !piper.disponivel || !estado.vozPiperPronta || !estado.livro) return false;
   const chaveAudio = gerador.chaveCap(estado.livro.id, estado.capIdx);
   const reg = await bd.obter('capAudio', chaveAudio);
   if(!reg) return false;
@@ -639,10 +639,17 @@ function mudarCapitulo(dir){
 /* ---------- geração Piper em segundo plano ---------- */
 function agendarGeracao(){
   if(estado.motor !== 'piper' || !piper.disponivel || !estado.vozPiperPronta || !estado.livro) return;
-  gerador.pedir(estado.livro, estado.capIdx);
-  const prox = proximoCapIncluido(1);
-  if(prox >= 0) gerador.pedir(estado.livro, prox);
+  // Gerar capítulo atual + próximos 3 em segundo plano — quando o leitor
+  // chegar lá, o áudio já vai estar pronto.
+  const inc = indicesIncluidos(estado.livro);
+  const pos = inc.indexOf(estado.capIdx);
+  for(let d = 0; d <= 3 && pos + d < inc.length; d++){
+    gerador.pedir(estado.livro, inc[pos + d]);
+  }
 }
+
+// Guard: impede _trocarParaPiperAgora de disparar durante troca de voz
+let _trocandoVoz = false;
 
 gerador.aoMudar = (ev) => {
   if(!estado.livro || ev.livroId !== estado.livro.id) return;
@@ -650,12 +657,15 @@ gerador.aoMudar = (ev) => {
   // Áudio natural ficou pronto para o capítulo atual enquanto a voz do sistema
   // estava lendo? Trocar imediatamente para o áudio Piper na frase atual.
   if(ev.estado === 'pronto' && ev.capIdx === estado.capIdx
-     && estado.tocando && !estado.modoAudio){
+     && estado.tocando && !estado.modoAudio && !_trocandoVoz){
     _trocarParaPiperAgora();
   }
+  // Quando um capítulo fica pronto, agendar o próximo (pipeline contínuo)
+  if(ev.estado === 'pronto') agendarGeracao();
 };
 
 async function _trocarParaPiperAgora(){
+  if(_trocandoVoz || !estado.tocando) return;
   // Parar voz do sistema sem mudar estado.tocando
   falaSistema.parar();
   // Tentar carregar o áudio Piper na posição da frase atual
@@ -937,22 +947,28 @@ function ligarEventos(){
     if(estavaTocando) tocar();
   });
   $('sel-voz-piper').addEventListener('change', async (e) => {
+    _trocandoVoz = true;
     const estavaTocando = estado.tocando;
-    if(estavaTocando) pausar();
-    piper.vozId = e.target.value;
-    bd.salvar('config', {chave: 'vozPiper', valor: piper.vozId});
-    // A voz já está baixada? Verificar no cache local (instantâneo)
-    estado.vozPiperPronta = _vozesBaixadas.has(piper.vozId);
-    // Limpar áudio gerado com a voz anterior
-    if(estado.livro){
-      gerador.cancelarLivro(estado.livro.id);
-      // apagarAudioLivro é I/O — não esperar se o worker está ocupado
-      gerador.apagarAudioLivro(estado.livro.id).catch(() => {});
+    try{
+      if(estavaTocando) pausar();
+      piper.vozId = e.target.value;
+      bd.salvar('config', {chave: 'vozPiper', valor: piper.vozId});
+      estado.vozPiperPronta = _vozesBaixadas.has(piper.vozId);
+      // Limpar áudio da voz anterior (await garante que não conflita com geração nova)
+      if(estado.livro){
+        gerador.cancelarLivro(estado.livro.id);
+        try{ await gerador.apagarAudioLivro(estado.livro.id); }catch{}
+      }
+      await preencherVozesPiper();
+      agendarGeracao();
+      if(estavaTocando) tocar();
+    }catch(err){
+      console.error('Erro ao trocar voz:', err);
+      // Garantir que o player não fique travado
+      if(estavaTocando && !estado.tocando) tocar();
+    }finally{
+      _trocandoVoz = false;
     }
-    // Atualizar UI (usa cache local, sem travar no worker)
-    await preencherVozesPiper();
-    agendarGeracao();
-    if(estavaTocando) tocar();
   });
   $('btn-baixar-voz').addEventListener('click', baixarVozPiper);
   $('sel-voz-sistema').addEventListener('change', (e) => {
