@@ -647,7 +647,30 @@ function agendarGeracao(){
 gerador.aoMudar = (ev) => {
   if(!estado.livro || ev.livroId !== estado.livro.id) return;
   atualizarEstadoAudioUI(ev);
+  // Áudio natural ficou pronto para o capítulo atual enquanto a voz do sistema
+  // estava lendo? Trocar imediatamente para o áudio Piper na frase atual.
+  if(ev.estado === 'pronto' && ev.capIdx === estado.capIdx
+     && estado.tocando && !estado.modoAudio){
+    _trocarParaPiperAgora();
+  }
 };
+
+async function _trocarParaPiperAgora(){
+  // Parar voz do sistema sem mudar estado.tocando
+  falaSistema.parar();
+  // Tentar carregar o áudio Piper na posição da frase atual
+  if(await tentarModoAudio()){
+    if(!estado.tocando) return;
+    marcarFrase();
+    audioEl.play().catch(() => {
+      estado.modoAudio = false;
+      if(estado.tocando) tocarFraseSistema();
+    });
+  } else {
+    // Falhou (raro) — voltar à voz do sistema
+    if(estado.tocando) tocarFraseSistema();
+  }
+}
 
 async function atualizarEstadoAudioUI(ev){
   const el = $('estado-audio');
