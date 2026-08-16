@@ -25,7 +25,7 @@ const CONCHA = [
   'icones/icone-180.png'
 ];
 // Bump this string on every deploy to invalidate the old cache.
-const VERSAO = 'copiloto-v3';
+const VERSAO = 'copiloto-v4';
 
 const HOSTS_CDN = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com'];
 
