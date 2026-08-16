@@ -137,6 +137,11 @@ const gerador = {
     return {estado: 'texto'};
   },
 
+  cancelarLivro(livroId){
+    this.fila = this.fila.filter(f => f.livro.id !== livroId);
+    if(this.atual && this.atual.livroId === livroId) this.atual.cancelado = true;
+  },
+
   pedir(livro, capIdx){
     if(capIdx < 0 || capIdx >= livro.capitulos.length) return;
     if(!livro.capitulos[capIdx].incluir) return;
@@ -152,12 +157,19 @@ const gerador = {
     this.ativo = true;
     while(this.fila.length){
       const {livro, capIdx} = this.fila.shift();
-      this.atual = {livroId: livro.id, capIdx};
+      this.atual = {livroId: livro.id, capIdx, cancelado: false};
       try{
-        if(await bd.obter('capAudio', this.chaveCap(livro.id, capIdx))) continue; // já pronto
+        const existente = await bd.obter('capAudio', this.chaveCap(livro.id, capIdx));
+        if(existente){
+          const frases = frasesDoCapitulo(livro.capitulos[capIdx]);
+          if(existente.nFrases === frases.length) continue;
+          await bd.apagar('capAudio', this.chaveCap(livro.id, capIdx));
+        }
         await this._gerarCapitulo(livro, capIdx);
       }catch(err){
-        this.aoMudar?.({livroId: livro.id, capIdx, estado: 'erro', erro: String(err?.message || err)});
+        if(!this.atual?.cancelado){
+          this.aoMudar?.({livroId: livro.id, capIdx, estado: 'erro', erro: String(err?.message || err)});
+        }
       }
     }
     this.atual = null;
@@ -170,9 +182,11 @@ const gerador = {
     // retomar de onde parou: frases já geradas ficam no banco
     const feitas = new Set((await bd.chaves('wavs')).filter(c => String(c).startsWith(prefixo)));
     for(let i = 0; i < frases.length; i++){
+      if(this.atual?.cancelado) return;
       const chave = `${prefixo}${i}`;
       if(feitas.has(chave)) continue;
       const buf = await piper.gerar(frases[i].falado);
+      if(this.atual?.cancelado) return;
       await bd.salvar('wavs', {chave, buf});
       this.aoMudar?.({livroId: livro.id, capIdx, estado: 'gerando', feito: i + 1, total: frases.length});
     }

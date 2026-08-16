@@ -175,6 +175,7 @@ function desenharBiblioteca(){
     info.querySelector('.btn-ouvir').addEventListener('click', () => abrirLivro(livro.id));
     info.querySelector('.btn-apagar').addEventListener('click', async () => {
       if(!confirm(`Apagar "${livro.titulo}" e o áudio gerado?`)) return;
+      gerador.cancelarLivro(livro.id);
       await bd.apagar('livros', livro.id);
       await bd.apagar('progresso', livro.id);
       await gerador.apagarAudioLivro(livro.id);
@@ -322,7 +323,12 @@ async function iniciarPreparo(arquivo){
 
 async function salvarLivro(){
   const {capitulos} = estado.limpo;
-  const palavras = capitulos.filter(c => c.incluir !== false).reduce((s, c) => s + contarPalavras(c.texto), 0);
+  const incluidos = capitulos.filter(c => c.incluir !== false);
+  if(!incluidos.length){
+    $('preparo-erro').innerHTML = `<div class="aviso aviso-erro">Marque ao menos um capítulo para incluir na leitura.</div>`;
+    return;
+  }
+  const palavras = incluidos.reduce((s, c) => s + contarPalavras(c.texto), 0);
   const id = await gerarId(estado.arquivoInfo.nome, estado.arquivoInfo.tamanho);
   const livro = {
     id,
@@ -420,8 +426,14 @@ function atualizarIconePlay(){
 /* ---------- via Piper (arquivo de áudio) ---------- */
 async function tentarModoAudio(){
   if(estado.motor !== 'piper' || !piper.disponivel || !estado.vozPiperPronta) return false;
-  const reg = await bd.obter('capAudio', gerador.chaveCap(estado.livro.id, estado.capIdx));
-  if(!reg || reg.nFrases !== estado.frases.length) return false;
+  const chaveAudio = gerador.chaveCap(estado.livro.id, estado.capIdx);
+  const reg = await bd.obter('capAudio', chaveAudio);
+  if(!reg) return false;
+  if(reg.nFrases !== estado.frases.length){
+    await bd.apagar('capAudio', chaveAudio);
+    agendarGeracao();
+    return false;
+  }
   if(estado.urlAudioAtual) URL.revokeObjectURL(estado.urlAudioAtual);
   estado.urlAudioAtual = URL.createObjectURL(new Blob([reg.wav], {type: 'audio/wav'}));
   estado.mapaAtual = reg.mapa;
@@ -450,9 +462,15 @@ audioEl.addEventListener('ended', () => {
 });
 audioEl.addEventListener('error', () => {
   if(!estado.modoAudio || !estado.tocando) return;
-  // arquivo corrompido? cai para o motor do sistema sem perder o lugar
   estado.modoAudio = false;
   tocarFraseSistema();
+});
+audioEl.addEventListener('pause', () => {
+  if(!estado.modoAudio || !estado.tocando) return;
+  estado.tocando = false;
+  estado.pausadoEm = Date.now();
+  atualizarIconePlay();
+  salvarProgressoAgora();
 });
 
 /* ---------- via sistema (speechSynthesis) ---------- */
@@ -465,11 +483,12 @@ function tocarFraseSistema(){
   pedirWakeLock();
   falaSistema.falar(f.falado, async () => {
     salvarProgressoAgora();
-    // capítulo ficou pronto no Piper enquanto líamos? troca na fronteira da frase
+    if(!estado.tocando) return;
     if(estado.fraseIdx + 1 < estado.frases.length){
       estado.fraseIdx++;
       if(estado.motor === 'piper' && await tentarModoAudio()){
-        audioEl.play().catch(() => { estado.modoAudio = false; tocarFraseSistema(); });
+        if(!estado.tocando) return;
+        audioEl.play().catch(() => { estado.modoAudio = false; if(estado.tocando) tocarFraseSistema(); });
         return;
       }
       if(estado.tocando) tocarFraseSistema(); else marcarFrase();
@@ -490,9 +509,18 @@ async function tocar(){
   atualizarIconePlay();
   agendarGeracao();
   if(await tentarModoAudio()){
+    if(!estado.tocando) return;
     marcarFrase();
-    audioEl.play().catch(() => { estado.modoAudio = false; tocarFraseSistema(); });
+    audioEl.play().catch(() => { estado.modoAudio = false; if(estado.tocando) tocarFraseSistema(); });
   } else {
+    if(!estado.tocando) return;
+    // iOS: preparar o <audio> dentro do gesto para Piper funcionar depois
+    try{
+      const sil = montarWav({canais: 1, taxa: 22050, bits: 16}, [new Uint8Array(44)]);
+      audioEl.src = URL.createObjectURL(new Blob([sil], {type: 'audio/wav'}));
+      await audioEl.play(); audioEl.pause();
+    }catch{}
+    if(!estado.tocando) return;
     estado.modoAudio = false;
     tocarFraseSistema();
   }
@@ -524,7 +552,10 @@ function irParaFrase(i){
   salvarProgressoAgora();
 }
 
-function avancarFrase(){ irParaFrase(estado.fraseIdx + 1); }
+function avancarFrase(){
+  if(estado.fraseIdx >= estado.frases.length - 1) avancarCapituloAuto();
+  else irParaFrase(estado.fraseIdx + 1);
+}
 function voltarFrase(){
   if(estado.fraseIdx > 0){ irParaFrase(estado.fraseIdx - 1); return; }
   const ant = proximoCapIncluido(-1);
@@ -808,7 +839,10 @@ function ligarEventos(){
   $('sel-voz-piper').addEventListener('change', async (e) => {
     piper.vozId = e.target.value;
     bd.salvar('config', {chave: 'vozPiper', valor: piper.vozId});
-    if(estado.livro) await gerador.apagarAudioLivro(estado.livro.id); // voz nova = áudio novo
+    if(estado.livro){
+      gerador.cancelarLivro(estado.livro.id);
+      await gerador.apagarAudioLivro(estado.livro.id);
+    }
     await preencherVozesPiper();
     agendarGeracao();
   });

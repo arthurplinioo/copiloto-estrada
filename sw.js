@@ -5,7 +5,6 @@
      em runtime — baixadas uma vez, servidas do cache para sempre.
    - Modelos de voz (huggingface): o vits-web guarda no OPFS; aqui só repassamos. */
 
-const VERSAO = 'copiloto-v1';
 const CONCHA = [
   './',
   'index.html',
@@ -25,6 +24,8 @@ const CONCHA = [
   'icones/icone-512.png',
   'icones/icone-180.png'
 ];
+// Bump this string on every deploy to invalidate the old cache.
+const VERSAO = 'copiloto-v2';
 
 const HOSTS_CDN = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com'];
 
@@ -62,7 +63,7 @@ self.addEventListener('fetch', (e) => {
   if(HOSTS_CDN.includes(url.hostname)){
     e.respondWith(
       caches.match(e.request).then(cacheado => cacheado || fetch(e.request).then(resp => {
-        if(resp.ok || resp.type === 'opaque'){
+        if(resp.ok){
           caches.open(VERSAO).then(c => c.put(e.request, resp.clone())).catch(() => {});
         }
         return resp.clone();
