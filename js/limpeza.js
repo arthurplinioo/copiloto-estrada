@@ -154,9 +154,11 @@ function detectarCapitulosTexto(texto){
   for(const p of paragrafos){
     const t = p.trim();
     if(!t) continue;
+    // Só números de nível único (1, 2, 3…) quebram capítulo; subseções (1.1, 2.3.1)
+    // ficam como títulos de seção DENTRO do capítulo (ehParagrafoTitulo cuida deles).
     const ehTitulo = t.length <= 70 && !/[.!?…]$/.test(t) &&
       (RE_TITULO.test(t) || /^[IVXLCDM]{1,7}$/.test(t) ||
-       (/^\d+(?:\.\d+)*\.?\s+\S/.test(t) && contarPalavras(t) <= 12) ||
+       (/^\d{1,3}\.?\s+\S/.test(t) && !/^\d+\.\d/.test(t) && contarPalavras(t) <= 12) ||
        (t === t.toUpperCase() && /\p{Lu}/u.test(t) && t.length >= 3 && contarPalavras(t) <= 8));
     if(ehTitulo && atual.pars.length){
       capitulos.push(atual);
@@ -204,7 +206,9 @@ function classificarCapitulo(cap){
   const palavras = contarPalavras(texto);
 
   if(RE_TITULO_DESCARTE.test(titulo)) return {incluir: false, motivo: 'seção editorial'};
-  if(palavras < 30) return {incluir: false, motivo: 'quase sem texto'};
+  // Capítulos muito curtos: só excluir se forem claramente editoriais (título reconhecido)
+  // Não excluir capítulos do miolo só por serem curtos — podem ser epígrafes, cartas, etc.
+  if(palavras < 5 && !titulo) return {incluir: false, motivo: 'quase sem texto'};
 
   const pars = texto.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
 
@@ -259,7 +263,7 @@ function executarLimpeza(bruto, regras){
     for(const pag of paginas){
       for(const l of pag.linhas){
         const fonteGrande = l.tam >= corpo * 1.35 && contarPalavras(l.texto) <= 12 && l.texto.length <= 90;
-        const secaoNumerada = /^\d+(?:\.\d+)*\.?\s+\S/.test(l.texto) && contarPalavras(l.texto) <= 12 && l.texto.length <= 90 && !/[.!?…]$/.test(l.texto);
+        const secaoNumerada = /^\d{1,3}\.?\s+\S/.test(l.texto) && !/^\d+\.\d/.test(l.texto) && contarPalavras(l.texto) <= 12 && l.texto.length <= 90 && !/[.!?…]$/.test(l.texto);
         const ehTitulo = fonteGrande || secaoNumerada;
         linhasTexto.push(ehTitulo ? `\n\n${l.texto}\n\n` : l.texto);
       }

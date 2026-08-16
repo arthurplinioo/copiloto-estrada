@@ -465,8 +465,11 @@ audioEl.addEventListener('error', () => {
   estado.modoAudio = false;
   tocarFraseSistema();
 });
+// Detecta pausa externa (ligação telefônica, controle do sistema).
+// _pausaProg impede que pausas programáticas (trocarCapitulo, prime iOS) disparem.
+let _pausaProg = false;
 audioEl.addEventListener('pause', () => {
-  if(!estado.modoAudio || !estado.tocando) return;
+  if(_pausaProg || !estado.modoAudio || !estado.tocando) return;
   estado.tocando = false;
   estado.pausadoEm = Date.now();
   atualizarIconePlay();
@@ -486,11 +489,8 @@ function tocarFraseSistema(){
     if(!estado.tocando) return;
     if(estado.fraseIdx + 1 < estado.frases.length){
       estado.fraseIdx++;
-      if(estado.motor === 'piper' && await tentarModoAudio()){
-        if(!estado.tocando) return;
-        audioEl.play().catch(() => { estado.modoAudio = false; if(estado.tocando) tocarFraseSistema(); });
-        return;
-      }
+      // Não trocar de motor no meio do capítulo — a troca acontece na
+      // fronteira entre capítulos (em tocar()), evitando oscilação de voz.
       if(estado.tocando) tocarFraseSistema(); else marcarFrase();
     } else {
       avancarCapituloAuto();
@@ -518,8 +518,10 @@ async function tocar(){
     try{
       const sil = montarWav({canais: 1, taxa: 22050, bits: 16}, [new Uint8Array(44)]);
       audioEl.src = URL.createObjectURL(new Blob([sil], {type: 'audio/wav'}));
+      _pausaProg = true;
       await audioEl.play(); audioEl.pause();
-    }catch{}
+      _pausaProg = false;
+    }catch{ _pausaProg = false; }
     if(!estado.tocando) return;
     estado.modoAudio = false;
     tocarFraseSistema();
@@ -529,7 +531,7 @@ async function tocar(){
 function pausar(){
   estado.tocando = false;
   estado.pausadoEm = Date.now();
-  if(estado.modoAudio) audioEl.pause();
+  if(estado.modoAudio){ _pausaProg = true; audioEl.pause(); _pausaProg = false; }
   falaSistema.parar();
   if(!estradaAberta()) soltarWakeLock();
   atualizarIconePlay();
@@ -576,7 +578,7 @@ function avancarCapituloAuto(){
 
 function trocarCapitulo(novoIdx, posFrase){
   estado.modoAudio = false;
-  audioEl.pause();
+  _pausaProg = true; audioEl.pause(); _pausaProg = false;
   falaSistema.parar();
   estado.capIdx = novoIdx;
   $('sel-capitulo').value = novoIdx;
@@ -628,7 +630,7 @@ async function abrirLivro(id){
   const livro = estado.livros.find(l => l.id === id);
   if(!livro) return;
   falaSistema.parar();
-  audioEl.pause();
+  _pausaProg = true; audioEl.pause(); _pausaProg = false;
   estado.modoAudio = false;
   estado.tocando = false;
   armarTimerDormir(0);
@@ -846,6 +848,8 @@ function ligarEventos(){
     agendarGeracao();
   });
   $('sel-voz-piper').addEventListener('change', async (e) => {
+    const estavaTocando = estado.tocando;
+    if(estavaTocando) pausar();
     piper.vozId = e.target.value;
     estado.vozPiperPronta = false; // nova voz: verificar se já está baixada
     bd.salvar('config', {chave: 'vozPiper', valor: piper.vozId});
@@ -855,6 +859,7 @@ function ligarEventos(){
     }
     await preencherVozesPiper();
     agendarGeracao();
+    if(estavaTocando) tocar();
   });
   $('btn-baixar-voz').addEventListener('click', baixarVozPiper);
   $('sel-voz-sistema').addEventListener('change', (e) => {

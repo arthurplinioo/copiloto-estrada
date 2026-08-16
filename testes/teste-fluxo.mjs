@@ -28,8 +28,8 @@ verificar('capítulo desmarcado fica riscado', d.querySelector('#lista-capitulos
 d.getElementById('btn-salvar-livro').click();
 await espera(350);
 verificar('player visível após salvar', visivel('tela-player'));
-// eram 3 capítulos: o III é auto-pulado (quase sem texto) e o I foi desmarcado à mão
-verificar('só capítulos incluídos no seletor (1)', d.getElementById('sel-capitulo').options.length === 1,
+// eram 3 capítulos: capítulos curtos não são mais auto-excluídos; o I foi desmarcado à mão
+verificar('só capítulos incluídos no seletor (2)', d.getElementById('sel-capitulo').options.length === 2,
   `(veio ${d.getElementById('sel-capitulo').options.length})`);
 verificar('frases renderizadas', d.querySelectorAll('#texto-leitura .frase').length > 30);
 verificar('frase atual marcada', !!d.querySelector('#texto-leitura .frase.atual'));

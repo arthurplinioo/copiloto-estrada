@@ -15,9 +15,9 @@ console.log('== TXT ==');
   const { capitulos, contagens } = w.executarLimpeza(bruto, w.REGRAS_PADRAO);
   const lidos = capitulos.filter(c => c.incluir);
   verificar('3 capítulos detectados', capitulos.length === 3, `(veio ${capitulos.length})`);
-  // o cap. III sintético tem só 28 palavras: o classificador o marca "quase sem texto"
-  verificar('capítulos com texto incluídos', lidos.length === 2 && capitulos[2].motivo === 'quase sem texto',
-    `(lidos=${lidos.length}, motivo=${capitulos[2]?.motivo})`);
+  // capítulos curtos do miolo não são mais excluídos automaticamente
+  verificar('capítulos com texto incluídos', lidos.length === 3,
+    `(lidos=${lidos.length})`);
   const tudo = capitulos.map(c => c.texto).join('\n');
   verificar('números de página removidos', contagens.numeros >= 5, `(${contagens.numeros})`);
   verificar('hifenização unida', tudo.includes('caminhão subia') && tudo.includes('acompanhava o ritmo'));
