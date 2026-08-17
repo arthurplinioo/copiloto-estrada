@@ -68,7 +68,9 @@ await ev(`(() => {
   estado.motor = 'piper';
   piper.disponivel = true;
   estado.vozPiperPronta = true;
-  // não gerar de verdade durante o teste
+  // não gerar de verdade durante o teste (o pedir real volta no fim, para o
+  // teste de laço do pipeline)
+  window.__pedirReal = gerador.pedir.bind(gerador);
   gerador.pedir = () => {};
   // o teste pré-fabricou áudio de TODOS os capítulos; a limpeza por janela
   // (que no app real só apaga o que a geração já deixou para trás) varreria
@@ -307,6 +309,131 @@ console.log('== proteções de armazenamento e memória ==');
     ev('piper._limiteReciclagem()') > 0 && ev('piper.FRASES_POR_WORKER_SEM_PATCH') < ev('piper.FRASES_POR_WORKER'));
   verificar('patch só é confirmado por reaproveitamento real',
     ev('piper._patchConfirmado') === false);
+}
+
+// ---------- regressões da revisão sênior ----------
+console.log('== pipeline de geração não entra em laço ==');
+{
+  // Cenário: capítulos já prontos de uma sessão anterior. O aviso de "pronto"
+  // reagendava a geração, que reencontrava os mesmos capítulos prontos, que
+  // avisavam de novo… laço infinito relendo dezenas de MB por volta.
+  const r = await ev(`(async () => {
+    gerador.pedir = window.__pedirReal;                    // gerador de verdade
+    gerador.limparForaDaJanela = window.__limparReal;
+    // sem este estado, agendarGeracao() sai na porta e o teste passaria à toa
+    estado.motor = 'piper'; piper.disponivel = true;
+    piper.vozId = 'pt_BR-faber-medium'; estado.vozPiperPronta = true;
+    gerador.prontos.clear(); gerador.falhas.clear(); gerador.fila = [];
+    let eventos = 0;
+    const aoMudarOrig = gerador.aoMudar;
+    gerador.aoMudar = (ev) => { eventos++; if(eventos < 400) aoMudarOrig(ev); };
+    for(let i = 0; i < 6; i++){
+      await bd.salvar('capAudio', {
+        chave: gerador.chaveCap('sobrecarga', i),
+        wav: new ArrayBuffer(64),
+        mapa: [{inicio: 0, dur: 1}],
+        duracao: 1, vozId: piper.vozId,
+        nFrases: frasesDoCapitulo(estado.livro.capitulos[i]).length
+      });
+    }
+    estado.capIdx = 0; gerador.capLendo = 0;
+    agendarGeracao();
+    await new Promise(r => setTimeout(r, 600));
+    gerador.aoMudar = aoMudarOrig;
+    return {eventos, fila: gerador.fila.length, ativo: gerador.ativo};
+  })()`);
+  verificar('não dispara enxurrada de eventos "pronto"', r.eventos < 30,
+    `(${r.eventos} eventos)`);
+  verificar('fila de geração esvazia', r.fila === 0, `(${r.fila} na fila)`);
+  verificar('gerador não fica preso ativo', r.ativo === false);
+
+  // capítulo já pronto não pode voltar para a fila
+  const naoReenfileira = await ev(`(() => {
+    gerador.fila = [];
+    gerador.prontos.add(gerador.chaveCap('sobrecarga', 2));
+    gerador.pedir(estado.livro, 2);
+    return gerador.fila.length === 0;
+  })()`);
+  verificar('capítulo pronto não volta para a fila', naoReenfileira);
+
+  // mas se o áudio for apagado, ele precisa poder ser refeito
+  const refaz = await ev(`(async () => {
+    gerador.fila = []; gerador.falhas.clear();
+    await gerador.limparForaDaJanela('sobrecarga', 99, 0, 0); // apaga tudo
+    const restantes = (await bd.chaves('capAudio')).filter(c=>String(c).startsWith('sobrecarga:'));
+    const esqueceu = !gerador.prontos.has(gerador.chaveCap('sobrecarga', 2));
+    gerador.pedir(estado.livro, 2);
+    const naFila = gerador.fila.some(f => f.capIdx === 2);
+    const emCurso = gerador.atual?.capIdx === 2;
+    gerador.fila = [];
+    return {esqueceu, aceitou: naFila || emCurso, restantes, prontos: [...gerador.prontos]};
+  })()`);
+  verificar('apagar o áudio limpa o registro de "pronto"', refaz.esqueceu,
+    `(capAudio=${JSON.stringify(refaz.restantes)} prontos=${JSON.stringify(refaz.prontos)})`);
+  verificar('áudio apagado volta a ser gerável', refaz.aceitou);
+}
+
+console.log('== nunca duas vozes ao mesmo tempo ==');
+{
+  // Encerrar o que ficou rodando dos blocos anteriores: a voz do sistema falsa
+  // encadeia frases sozinha e contaminaria a medição deste teste.
+  ev('pausar(); falaSistema.parar(); estado.tocando = false; estado.modoAudio = false;');
+  await espera(80);
+
+  const r = await ev(`(async () => {
+    gerador.pedir = () => {};
+    // o bloco de troca de voz deixou o motor num estado que não gera áudio
+    estado.motor = 'piper'; piper.disponivel = true;
+    piper.vozId = 'pt_BR-faber-medium'; estado.vozPiperPronta = true;
+    window.__falouDurante = 0;
+    falaSistema.suportada = true;
+    falaSistema.falar = (t, aoFim) => { window.__falouDurante++; setTimeout(() => aoFim && aoFim(), 5); };
+    falaSistema.parar = () => {};
+    falaSistema.estaFalando = () => false;   // pior caso: parece sempre mudo
+    estado.capIdx = 0; prepararCapitulo(); estado.fraseIdx = 0;
+    estado.tocando = true; estado.modoAudio = false;
+    // banco lento, como no celular: a rede de segurança tem tempo de agir
+    const obterReal = bd.obter.bind(bd);
+    bd.obter = async (loja, chave) => {
+      if(loja === 'capAudio') await new Promise(r => setTimeout(r, 120));
+      return obterReal(loja, chave);
+    };
+    await bd.salvar('capAudio', {chave: gerador.chaveCap('sobrecarga', 0),
+      wav: montarWav({canais:1,taxa:22050,bits:16}, [new Uint8Array(4410)]),
+      mapa: estado.frases.map((_, k) => ({inicio: k*0.1, dur: 0.1})),
+      duracao: estado.frases.length*0.1, vozId: piper.vozId, nFrases: estado.frases.length});
+    window.__falouDurante = 0;
+    const p = _iniciarCapitulo();
+    // durante o await, disparar exatamente o evento que acionava o socorro
+    window.dispatchEvent(new window.Event('unhandledrejection'));
+    await new Promise(r => setTimeout(r, 40));
+    const falouNoMeio = window.__falouDurante;
+    await p;
+    bd.obter = obterReal;
+    return {falouNoMeio, modoAudio: estado.modoAudio, tocando: estado.tocando};
+  })()`);
+  verificar('rede de segurança não fala por cima da transição', r.falouNoMeio === 0,
+    `(voz do sistema chamada ${r.falouNoMeio}x durante o await)`);
+  verificar('terminou em modo áudio', r.modoAudio === true);
+  verificar('leitura segue ativa', r.tocando === true);
+}
+
+console.log('== fim de mídia detectado mesmo sem a flag ended ==');
+{
+  const r = await ev(`(() => {
+    estado.tocando = true; estado.modoAudio = true;
+    Object.defineProperty(audioEl, 'ended', {value: false, configurable: true});
+    Object.defineProperty(audioEl, 'duration', {value: 10, configurable: true});
+    Object.defineProperty(audioEl, 'currentTime', {value: 9.9, configurable: true, writable: true});
+    audioEl.dispatchEvent(new Event('pause'));   // pause no fim, sem ended
+    const sobreviveu = estado.tocando;
+    // e uma pausa de verdade no meio ainda tem de pausar
+    Object.defineProperty(audioEl, 'currentTime', {value: 2, configurable: true, writable: true});
+    audioEl.dispatchEvent(new Event('pause'));
+    return {sobreviveu, pausouNoMeio: estado.tocando === false};
+  })()`);
+  verificar('pause no fim da mídia não pausa (mesmo sem ended)', r.sobreviveu);
+  verificar('pause no meio ainda pausa de verdade', r.pausouNoMeio);
 }
 
 console.log(falhas.length ? `\n${falhas.length} FALHA(S)` : '\nSOBRECARGA OK');

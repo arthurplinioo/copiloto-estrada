@@ -55,9 +55,11 @@ audioEl.preload = 'auto';
    Wake lock (necessário só para o motor do sistema e Modo Estrada)
    ===================================================================== */
 async function pedirWakeLock(){
-  // soltar o anterior antes de pedir outro: alternar visibilidade várias vezes
-  // acumulava sentinelas de tela ligada, que nunca eram liberadas
-  if(estado.wakeLock){ try{ await estado.wakeLock.release(); }catch{} estado.wakeLock = null; }
+  // Já temos um sentinel vivo? Não pedir outro. Esta função é chamada a cada
+  // frase da voz do sistema: soltar e repedir criava uma janela sem trava e,
+  // se o aparelho negasse o novo pedido, a tela apagava no Modo Estrada.
+  if(estado.wakeLock && !estado.wakeLock.released) return;
+  estado.wakeLock = null;
   try{ if('wakeLock' in navigator) estado.wakeLock = await navigator.wakeLock.request('screen'); }catch{}
 }
 function soltarWakeLock(){
@@ -434,8 +436,10 @@ async function tentarModoAudio(){
   const chaveAudio = gerador.chaveCap(estado.livro.id, estado.capIdx);
   const reg = await bd.obter('capAudio', chaveAudio);
   if(!reg) return false;
-  if(reg.nFrases !== estado.frases.length){
+  if(reg.nFrases !== estado.frases.length || !Array.isArray(reg.mapa) || !reg.mapa.length){
+    // registro velho, incompleto ou de outra divisão de frases: descartar
     await bd.apagar('capAudio', chaveAudio);
+    gerador._esquecer(estado.livro.id, estado.capIdx);
     agendarGeracao();
     return false;
   }
@@ -476,12 +480,20 @@ audioEl.addEventListener('error', () => {
 // Detecta pausa externa (ligação telefônica, controle do sistema).
 // _pausaProg impede que pausas programáticas (trocarCapitulo, prime iOS) disparem.
 let _pausaProg = false;
+/* A mídia está acabando? Alguns navegadores disparam 'pause' antes de marcar
+   .ended, e confiar só na flag reintroduz a pausa a cada capítulo. */
+function _fimDaMidia(){
+  if(audioEl.ended) return true;
+  const d = audioEl.duration;
+  return Number.isFinite(d) && d > 0 && d - audioEl.currentTime < 0.5;
+}
+
 audioEl.addEventListener('pause', () => {
   // IMPORTANTE: pela especificação HTML, o navegador dispara 'pause' ANTES de
   // 'ended' quando a mídia chega ao fim. Sem esta guarda, o fim de cada capítulo
   // zerava estado.tocando e o avanço automático abortava — o usuário precisava
   // apertar play a cada trecho.
-  if(audioEl.ended) return;
+  if(_fimDaMidia()) return;
   if(_pausaProg || !estado.modoAudio || !estado.tocando) return;
   estado.tocando = false;
   estado.pausadoEm = Date.now();
@@ -553,28 +565,41 @@ let _audioPrimado = false;
 
 /* Lógica interna: inicia a leitura do capítulo atual.
    Chamada por tocar() e por avancarCapituloAuto() — não faz prime iOS. */
+// Verdadeiro enquanto uma troca de motor está em andamento. A rede de segurança
+// não pode "socorrer" nessa janela: ela via tocando=true com ninguém falando
+// (porque o await do banco ainda não voltou) e ligava a voz do sistema por cima
+// do áudio que estava prestes a tocar — as duas vozes ao mesmo tempo.
+let _transicionando = false;
+
 async function _iniciarCapitulo(){
   if(!estado.tocando) return;
-  let temAudio = false;
+  _transicionando = true;
   try{
-    temAudio = await tentarModoAudio();
-  }catch(err){
-    // IndexedDB recusando, memória curta, registro antigo sem mapa… nada disso
-    // pode emudecer a leitura: a voz do sistema assume e o livro continua.
-    console.error('[copiloto:audio]', err);
-    estado.modoAudio = false;
-    temAudio = false;
-  }
-  if(!estado.tocando) return;
-  if(temAudio){
-    marcarFrase();
-    audioEl.play().catch(() => {
+    let temAudio = false;
+    try{
+      temAudio = await tentarModoAudio();
+    }catch(err){
+      // IndexedDB recusando, memória curta, registro antigo sem mapa… nada disso
+      // pode emudecer a leitura: a voz do sistema assume e o livro continua.
+      console.error('[copiloto:audio]', err);
       estado.modoAudio = false;
-      if(estado.tocando) tocarFraseSistema();
-    });
-  } else {
-    estado.modoAudio = false;
-    tocarFraseSistema();
+      temAudio = false;
+    }
+    if(!estado.tocando) return;
+    if(temAudio){
+      // garantir que a voz do sistema não ficou falando durante o await
+      falaSistema.parar();
+      marcarFrase();
+      audioEl.play().catch(() => {
+        estado.modoAudio = false;
+        if(estado.tocando) tocarFraseSistema();
+      });
+    } else {
+      estado.modoAudio = false;
+      tocarFraseSistema();
+    }
+  }finally{
+    _transicionando = false;
   }
 }
 
@@ -727,31 +752,37 @@ gerador.aoMudar = (ev) => {
      && estado.tocando && !estado.modoAudio && !_trocandoVoz){
     _trocarParaPiperAgora();
   }
-  // Quando um capítulo fica pronto, agendar o próximo (pipeline contínuo)
-  if(ev.estado === 'pronto') agendarGeracao();
+  // Pipeline contínuo: ao concluir um capítulo, engatar o próximo. Só quando
+  // houve geração de verdade — reagendar em cima de "já existia" fazia o
+  // gerador reenfileirar os mesmos capítulos em laço infinito.
+  if(ev.estado === 'pronto' && !ev.jaExistia) agendarGeracao();
 };
 
 async function _trocarParaPiperAgora(){
-  if(_trocandoVoz || !estado.tocando) return;
-  // Carregar o áudio ANTES de calar a voz do sistema: se isto falhar, a leitura
-  // não pode ficar em silêncio (antes o parar() vinha primeiro e um erro aqui
-  // deixava o app mudo com o botão marcando "tocando").
-  let pronto = false;
+  if(_trocandoVoz || _transicionando || !estado.tocando) return;
+  _transicionando = true;
   try{
-    pronto = await tentarModoAudio();
-  }catch(err){
-    console.error('[copiloto:troca-piper]', err);
-    estado.modoAudio = false;
-    return; // a voz do sistema segue lendo, intacta
+    // Carregar o áudio ANTES de calar a voz do sistema: se isto falhar, a
+    // leitura não pode ficar em silêncio (antes o parar() vinha primeiro e um
+    // erro aqui deixava o app mudo com o botão marcando "tocando").
+    let pronto = false;
+    try{
+      pronto = await tentarModoAudio();
+    }catch(err){
+      console.error('[copiloto:troca-piper]', err);
+      estado.modoAudio = false;
+      return; // a voz do sistema segue lendo, intacta
+    }
+    if(!estado.tocando || !pronto) return;
+    falaSistema.parar();
+    marcarFrase();
+    audioEl.play().catch(() => {
+      estado.modoAudio = false;
+      if(estado.tocando) tocarFraseSistema();
+    });
+  }finally{
+    _transicionando = false;
   }
-  if(!estado.tocando) return;
-  if(!pronto) return;
-  falaSistema.parar();
-  marcarFrase();
-  audioEl.play().catch(() => {
-    estado.modoAudio = false;
-    if(estado.tocando) tocarFraseSistema();
-  });
 }
 
 async function atualizarEstadoAudioUI(ev){
@@ -829,9 +860,9 @@ async function abrirLivro(id){
   prepararCapitulo();
   atualizarIconePlay();
   mostrarTela('player');
-  // Áudio dos outros livros só ocupa espaço agora — liberar antes de gerar,
-  // senão o armazenamento cresce sem limite de um livro para o outro.
-  gerador.limparOutrosLivros(livro.id).catch(() => {});
+  // Só libera o áudio dos outros livros quando o armazenamento aperta — quem
+  // alterna entre dois títulos não perde o que já foi gerado à toa.
+  gerador.limparOutrosLivrosSePreciso(livro.id).catch(() => {});
   agendarGeracao();
   await bd.salvar('config', {chave: 'ultimoLivro', valor: id});
 }
@@ -1052,7 +1083,9 @@ async function baixarVozPiper(){
     // Gerar uma frase curta agora aquece esses caches E prova que a voz funciona.
     prog.textContent = 'Preparando o motor de voz (última etapa)…';
     try{
-      await piper.gerar('Teste de voz.');
+      // timeout curto: com CDN lento não vale prender o usuário por minutos
+      // logo depois de ele já ter esperado o download do modelo.
+      await piper.gerar('Teste de voz.', 45000);
       estado.vozPiperPronta = true;
       prog.textContent = 'Voz pronta ✓ Agora funciona offline, sem internet.';
     }catch(err){
@@ -1221,7 +1254,9 @@ function ligarRedeDeSeguranca(){
     // sistema. Não exigir modoAudio aqui: os caminhos que emudecem a leitura
     // justamente deixam modoAudio falso, e a rede nunca resgatava ninguém.
     const mudo = estado.modoAudio ? audioEl.paused : !falaSistema.estaFalando();
-    if(estado.tela === 'player' && estado.tocando && mudo){
+    // _transicionando: durante a troca de motor o silêncio é esperado (o banco
+    // ainda está respondendo). Socorrer aqui punha duas vozes para tocar juntas.
+    if(estado.tela === 'player' && estado.tocando && mudo && !_transicionando && !_trocandoVoz){
       estado.modoAudio = false;
       try{ tocarFraseSistema(); }catch{}
     }

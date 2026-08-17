@@ -239,11 +239,11 @@ const piper = {
     return this._patchConfirmado ? this.FRASES_POR_WORKER : this.FRASES_POR_WORKER_SEM_PATCH;
   },
 
-  async gerar(texto){
+  async gerar(texto, timeoutMs = 300000){
     if(this._geradasNesteWorker >= this._limiteReciclagem()){
       this.reiniciar(); // zera _geradasNesteWorker
     }
-    const r = await this._chamar({tipo: 'gerar', texto, vozId: this.vozId}, 300000);
+    const r = await this._chamar({tipo: 'gerar', texto, vozId: this.vozId}, timeoutMs);
     // Só confirma quando o worker avisa que a sessão veio mesmo do cache.
     // A primeira frase de cada worker cria a sessão, então nunca reaproveita.
     if(r.sessaoReaproveitada) this._patchConfirmado = true;
@@ -259,6 +259,7 @@ const gerador = {
   atual: null,         // {livroId, capIdx}
   aoMudar: null,       // callback de estado p/ UI
   falhas: new Map(),   // chaveCap -> nº de tentativas que falharam
+  prontos: new Set(),  // chaveCap já concluída com a voz atual
   MAX_TENTATIVAS: 2,
 
   chaveCap(livroId, capIdx){ return `${livroId}:${capIdx}`; },
@@ -272,49 +273,81 @@ const gerador = {
   cancelarLivro(livroId){
     this.fila = this.fila.filter(f => f.livro.id !== livroId);
     if(this.atual && this.atual.livroId === livroId) this.atual.cancelado = true;
-    for(const k of [...this.falhas.keys()]){
-      if(String(k).startsWith(`${livroId}:`)) this.falhas.delete(k);
-    }
+    this._esquecer(livroId);
+  },
+
+  /* Tira do cache de estado tudo que pertence a um livro (ou a um capítulo).
+     'prontos' precisa acompanhar o que existe no banco, senão o gerador acha
+     que um capítulo apagado continua pronto e nunca mais o refaz. */
+  _esquecer(livroId, capIdx){
+    const alvo = capIdx == null ? `${livroId}:` : this.chaveCap(livroId, capIdx);
+    const bate = (k) => capIdx == null ? String(k).startsWith(alvo) : String(k) === alvo;
+    for(const k of [...this.falhas.keys()]) if(bate(k)) this.falhas.delete(k);
+    for(const k of [...this.prontos]) if(bate(k)) this.prontos.delete(k);
   },
 
   /* Um capítulo em WAV ocupa dezenas de MB. Guardamos só uma janela em volta
      de onde o leitor está; o resto é apagado para não estourar a cota do
      IndexedDB (era o que derrubava o app depois de alguns trechos). */
-  async limparForaDaJanela(livroId, capIdxAtual, antes = 1, depois = 3){
+  async limparForaDaJanela(livroId, capIdxAtual, antes = 1, depois = 3, preservar = null){
     try{
-      const chaves = await bd.chaves('capAudio');
       const pref = `${livroId}:`;
-      for(const c of chaves){
+      // 'preservar': capítulo em geração agora. Suas frases já sintetizadas não
+      // podem cair na varredura, senão a retentativa recomeça do zero.
+      const fora = (idx) => idx !== preservar &&
+        (idx < capIdxAtual - antes || idx > capIdxAtual + depois);
+
+      for(const c of await bd.chaves('capAudio')){
         const s = String(c);
         if(!s.startsWith(pref)) continue;
         const idx = Number(s.slice(pref.length));
-        if(Number.isNaN(idx)) continue;
-        if(idx < capIdxAtual - antes || idx > capIdxAtual + depois){
-          await bd.apagar('capAudio', c);
-        }
+        if(Number.isNaN(idx) || !fora(idx)) continue;
+        await bd.apagar('capAudio', c);
+        this.prontos.delete(s);
       }
       // frases soltas de capítulos já montados também podem ficar para trás
-      const kw = await bd.chaves('wavs');
-      for(const c of kw){
+      for(const c of await bd.chaves('wavs')){
         const s = String(c);
         if(!s.startsWith(pref)) continue;
         const idx = Number(s.slice(pref.length).split(':')[0]);
-        if(Number.isNaN(idx)) continue;
-        if(idx < capIdxAtual - antes || idx > capIdxAtual + depois){
-          await bd.apagar('wavs', c);
-        }
+        if(Number.isNaN(idx) || !fora(idx)) continue;
+        await bd.apagar('wavs', c);
+      }
+      // Podar 'prontos' pela faixa, não só pelo que foi apagado agora: assim o
+      // cache nunca fica afirmando que existe áudio que já saiu do banco por
+      // outro caminho — o gerador se recusaria a refazer o capítulo.
+      for(const k of [...this.prontos]){
+        const s = String(k);
+        if(!s.startsWith(pref)) continue;
+        const idx = Number(s.slice(pref.length));
+        if(!Number.isNaN(idx) && fora(idx)) this.prontos.delete(s);
       }
     }catch{}
   },
 
+  /* Só limpa os outros livros se o armazenamento estiver apertado. Apagar a
+     cada troca de livro faria o leitor que alterna entre dois títulos perder
+     horas de áudio já gerado toda vez. */
+  async limparOutrosLivrosSePreciso(livroAtualId, limiar = 0.6){
+    try{
+      const est = await navigator.storage?.estimate?.();
+      if(est?.usage && est?.quota && est.usage / est.quota < limiar) return false;
+    }catch{ /* sem estimativa: seguir com a limpeza, é o lado seguro */ }
+    await this.limparOutrosLivros(livroAtualId);
+    return true;
+  },
+
   /* Áudio de livros que não estão sendo lidos: dezenas ou centenas de MB que
-     ficavam presos até o livro ser apagado da estante. Some ao abrir outro. */
+     ficavam presos até o livro ser apagado da estante. */
   async limparOutrosLivros(livroAtualId){
     try{
       for(const loja of ['capAudio', 'wavs']){
         for(const c of await bd.chaves(loja)){
           const s = String(c);
-          if(!s.startsWith(`${livroAtualId}:`)) await bd.apagar(loja, c);
+          if(!s.startsWith(`${livroAtualId}:`)){
+            await bd.apagar(loja, c);
+            this.prontos.delete(s);
+          }
         }
       }
     }catch{}
@@ -324,12 +357,18 @@ const gerador = {
     if(capIdx < 0 || capIdx >= livro.capitulos.length) return;
     if(!livro.capitulos[capIdx].incluir) return;
     const chave = this.chaveCap(livro.id, capIdx);
+    // Já concluído nesta sessão: NÃO reenfileirar. Sem esta guarda, o aviso de
+    // "pronto" fazia o app reagendar o mesmo capítulo, que ficava pronto de
+    // novo, num laço infinito que relia dezenas de MB a cada volta.
+    if(this.prontos.has(chave)) return;
     // capítulo que já falhou demais: não insistir para sempre
     if((this.falhas.get(chave) || 0) >= this.MAX_TENTATIVAS) return;
     if(this.fila.some(f => this.chaveCap(f.livro.id, f.capIdx) === chave)) return;
     if(this.atual && this.chaveCap(this.atual.livroId, this.atual.capIdx) === chave) return;
     this.fila.push({livro, capIdx});
-    this._rodar();
+    // sem o catch, uma falha aqui virava unhandledrejection e acionava a rede
+    // de segurança do app no meio de uma troca de capítulo
+    this._rodar().catch(err => console.error('[copiloto:gerador]', err));
   },
 
   // Capítulo em que o leitor está agora — a limpeza de emergência por falta de
@@ -363,14 +402,17 @@ const gerador = {
             // este aviso o app nunca trocava da voz do sistema para a neural
             // num capítulo cujo áudio já existia no banco.
             this.falhas.delete(chave);
+            this.prontos.add(chave); // impede reenfileiramento em laço
             this.aoMudar?.({livroId: livro.id, capIdx, estado: 'pronto',
                             duracao: existente.duracao, jaExistia: true});
             continue;
           }
           await bd.apagar('capAudio', chave);
+          this.prontos.delete(chave);
         }
         await this._gerarCapitulo(livro, capIdx);
         this.falhas.delete(chave);
+        this.prontos.add(chave);
       }catch(err){
         if(this.atual?.cancelado) continue;
         const msg = String(err?.message || err);
@@ -388,7 +430,7 @@ const gerador = {
         // centrada em ONDE O LEITOR ESTÁ — centrar no capítulo em geração
         // (que vai até 2 à frente) apagava o áudio do capítulo tocando agora.
         if(/quota|QuotaExceeded|espaço/i.test(msg) && n < this.MAX_TENTATIVAS){
-          await this.limparForaDaJanela(livro.id, this.capLendo, 0, 1);
+          await this.limparForaDaJanela(livro.id, this.capLendo, 0, 1, capIdx);
           await this.limparOutrosLivros(livro.id);
           this.fila.unshift({livro, capIdx});
           continue;
@@ -442,6 +484,7 @@ const gerador = {
   },
 
   async apagarAudioLivro(livroId){
+    this._esquecer(livroId);
     await bd.apagarPrefixo('capAudio', `${livroId}:`);
     await bd.apagarPrefixo('wavs', `${livroId}:`);
   }

@@ -25,7 +25,7 @@ const CONCHA = [
   'icones/icone-180.png'
 ];
 // Bump this string on every deploy to invalidate the old cache.
-const VERSAO = 'copiloto-v11';
+const VERSAO = 'copiloto-v12';
 
 const HOSTS_CDN = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com'];
 
@@ -61,11 +61,18 @@ self.addEventListener('fetch', (e) => {
         const rede = fetch(e.request).then(resp => {
           if(resp.ok){
             const copia = resp.clone();
-            // waitUntil: sem isto o SW podia ser encerrado antes de gravar
-            e.waitUntil(caches.open(VERSAO).then(c => c.put(e.request, copia)).catch(() => {}));
+            return caches.open(VERSAO)
+              .then(c => c.put(e.request, copia))
+              .catch(() => {})
+              .then(() => resp);
           }
           return resp;
         }).catch(() => cacheado);
+        // Com cache hit, o respondWith resolve na hora e o evento fica inativo:
+        // chamar waitUntil depois disso lança InvalidStateError e a revalidação
+        // em segundo plano morre calada. Registrar a gravação AGORA, enquanto o
+        // evento ainda está ativo.
+        if(cacheado) e.waitUntil(rede.catch(() => {}));
         return cacheado || rede;
       })
     );
