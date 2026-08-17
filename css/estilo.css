@@ -175,9 +175,10 @@ select,input[type=text]{font:inherit;color:var(--tinta);background:var(--superfi
 #btn-voltar-15 small, #btn-avancar-30 small{font-size:.62rem;font-weight:700;opacity:.75;margin-top:1px}
 /* navegação por frase: secundária, abaixo da linha principal */
 .linha-frases{margin-top:.55rem;gap:.6rem}
+/* 44px é o alvo mínimo de toque recomendado no iOS — no carro, mais ainda */
 .ctl-menor{
-  min-width:auto;min-height:38px;border-radius:19px;padding:0 .95rem;
-  font-size:.8rem;font-weight:600;color:var(--tinta-2);
+  min-width:auto;min-height:44px;border-radius:22px;padding:0 1.05rem;
+  font-size:.82rem;font-weight:600;color:var(--tinta-2);
 }
 .linha-ajustes{display:flex;align-items:center;gap:.7rem;justify-content:center;flex-wrap:wrap;font-size:.88rem;color:var(--tinta-2)}
 .faixa-vel{display:flex;align-items:center;gap:.45rem}
