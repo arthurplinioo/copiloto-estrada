@@ -656,6 +656,63 @@ function irParaFrase(i){
   salvarProgressoAgora();
 }
 
+/* ---------- salto por tempo (o gesto que todo mundo já conhece) ----------
+   No volante, "perdi o fio, volta 15 segundos" é mais previsível do que
+   "volta uma frase" — frase pode ter 2 s ou 20 s. No modo áudio saltamos na
+   linha do tempo do WAV; na voz do sistema não há linha do tempo, então
+   estimamos pelo número de palavras faladas por minuto. */
+const PALAVRAS_POR_MIN = 165;
+
+function _duracaoEstimadaFrase(i){
+  const f = estado.frases[i];
+  if(!f) return 0;
+  const palavras = Math.max(1, contarPalavras(f.falado || f.texto || ''));
+  return (palavras / (PALAVRAS_POR_MIN * (falaSistema.taxa || 1))) * 60;
+}
+
+function saltarSegundos(seg){
+  if(!estado.livro || !estado.frases.length) return;
+  if(estado.modoAudio && estado.mapaAtual?.length){
+    const dur = Number.isFinite(audioEl.duration) ? audioEl.duration : null;
+    const alvo = audioEl.currentTime + seg;
+    if(alvo < 0){
+      // antes do início: recuar para o capítulo anterior, no fim dele
+      const ant = proximoCapIncluido(-1);
+      if(ant >= 0){ trocarCapitulo(ant, -1); return; }
+      try{ audioEl.currentTime = 0; }catch{}
+    } else if(dur != null && alvo >= dur){
+      avancarCapituloAuto();
+      return;
+    } else {
+      try{ audioEl.currentTime = alvo; }catch{}
+    }
+    // sincronizar o cursor de frase com a nova posição
+    const t = audioEl.currentTime;
+    let idx = estado.mapaAtual.findIndex(m => t < m.inicio + m.dur);
+    if(idx < 0) idx = estado.mapaAtual.length - 1;
+    estado.fraseIdx = idx;
+    marcarFrase();
+    salvarProgressoAgora();
+    return;
+  }
+  // voz do sistema: andar frases até somar o tempo pedido
+  let restante = Math.abs(seg);
+  let i = estado.fraseIdx;
+  const passo = seg < 0 ? -1 : 1;
+  while(restante > 0){
+    const prox = i + passo;
+    if(prox < 0){
+      const ant = proximoCapIncluido(-1);
+      if(ant >= 0){ trocarCapitulo(ant, -1); return; }
+      i = 0; break;
+    }
+    if(prox > estado.frases.length - 1){ avancarCapituloAuto(); return; }
+    i = prox;
+    restante -= _duracaoEstimadaFrase(i);
+  }
+  irParaFrase(i);
+}
+
 function avancarFrase(){
   if(estado.fraseIdx >= estado.frases.length - 1) avancarCapituloAuto();
   else irParaFrase(estado.fraseIdx + 1);
@@ -864,6 +921,7 @@ async function abrirLivro(id){
   // alterna entre dois títulos não perde o que já foi gerado à toa.
   gerador.limparOutrosLivrosSePreciso(livro.id).catch(() => {});
   agendarGeracao();
+  _atualizarBotaoPreparo();
   await bd.salvar('config', {chave: 'ultimoLivro', valor: id});
 }
 
@@ -882,10 +940,12 @@ function atualizarMediaSession(){
     });
     navigator.mediaSession.setActionHandler('play', tocar);
     navigator.mediaSession.setActionHandler('pause', pausar);
-    navigator.mediaSession.setActionHandler('previoustrack', voltarFrase);
-    navigator.mediaSession.setActionHandler('nexttrack', avancarFrase);
-    navigator.mediaSession.setActionHandler('seekbackward', voltarFrase);
-    navigator.mediaSession.setActionHandler('seekforward', avancarFrase);
+    // No carro, ⏮/⏭ mudam de capítulo (é o que se espera de "faixa") e os
+    // botões de retroceder/avançar saltam tempo, não frase.
+    navigator.mediaSession.setActionHandler('previoustrack', () => mudarCapitulo(-1));
+    navigator.mediaSession.setActionHandler('nexttrack', () => mudarCapitulo(1));
+    navigator.mediaSession.setActionHandler('seekbackward', (d) => saltarSegundos(-(d?.seekOffset || 15)));
+    navigator.mediaSession.setActionHandler('seekforward', (d) => saltarSegundos(d?.seekOffset || 30));
   }catch{}
 }
 
@@ -1006,6 +1066,7 @@ async function preencherVozesPiper(){
   btn.classList.toggle('oculto', estado.vozPiperPronta);
   btn.disabled = false;
   $('voz-piper-ok').classList.toggle('oculto', !estado.vozPiperPronta);
+  _atualizarBotaoPreparo();
   const btnApagar = $('btn-apagar-voz');
   if(btnApagar){
     btnApagar.classList.toggle('oculto', !estado.vozPiperPronta);
@@ -1013,6 +1074,105 @@ async function preencherVozesPiper(){
   }
   atualizarEstadoAudioUI();
   mostrarUsoArmazenamento();
+}
+
+/* =====================================================================
+   Preparar o livro inteiro antes da viagem
+   No iOS a geração só anda com o app aberto na frente. Deixar tudo pronto
+   em casa, no wi-fi, é o que faz o app servir de verdade no carro.
+   ===================================================================== */
+const _mb = (n) => `${Math.round(n / 1048576)} MB`;
+
+function _atualizarBotaoPreparo(){
+  const bloco = $('preparo-viagem');
+  if(!bloco) return;
+  const ligado = estado.motor === 'piper' && piper.disponivel && estado.vozPiperPronta && estado.livro;
+  bloco.classList.toggle('oculto', !ligado);
+  if(!ligado) return;
+  const preparado = estado.livro && gerador.livrosPreparados.has(estado.livro.id);
+  const btn = $('btn-preparar-livro');
+  if(!gerador.preparandoTudo){
+    btn.textContent = preparado ? 'Livro pronto ✓ (preparar de novo)' : 'Preparar livro inteiro';
+    btn.disabled = false;
+  }
+}
+
+async function prepararLivroInteiro(){
+  if(!estado.livro || gerador.preparandoTudo) return;
+  const btn = $('btn-preparar-livro');
+  const btnParar = $('btn-parar-preparo');
+  const info = $('preparo-info');
+  const barra = $('barra-preparo');
+
+  // Aviso honesto de espaço ANTES de começar: áudio cru pesa muito.
+  const estimado = gerador.estimarBytesLivro(estado.livro);
+  const esp = await gerador.espacoLivre();
+  let aviso = `Vou gerar o áudio de todo o livro (~${_mb(estimado)}).`;
+  if(esp) aviso += ` Seu aparelho tem ${_mb(esp.livre)} livres.`;
+  if(esp && estimado > esp.livre * 0.9){
+    aviso += '\n\nProvavelmente NÃO cabe tudo. Vou preparar o máximo que couber, começando pelo capítulo atual.';
+  }
+  aviso += '\n\nDeixe o app aberto e o aparelho ligado na tomada. Pode demorar bastante.\n\nComeçar?';
+  if(!confirm(aviso)) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Preparando…';
+  btnParar.classList.remove('oculto');
+  barra.classList.remove('oculto');
+  pedirWakeLock(); // não deixar a tela apagar e suspender a geração
+
+  gerador.aoPreparar = (ev) => {
+    const pct = ev.total ? Math.round((ev.feitos / ev.total) * 100) : 0;
+    $('preparo-barra').style.width = pct + '%';
+    if(ev.estado === 'gerando'){
+      info.textContent = `Capítulo ${ev.feitos + 1} de ${ev.total}…`;
+    } else if(ev.estado === 'pronto'){
+      info.textContent = `${ev.feitos} de ${ev.total} prontos`;
+    } else if(ev.estado === 'sem-espaco'){
+      info.textContent = `Espaço acabou em ${ev.feitos} de ${ev.total} capítulos.`;
+    }
+  };
+  // enquanto gera, mostrar o andamento frase a frase também
+  const aoMudarOrig = gerador.aoMudar;
+  gerador.aoMudar = (ev) => {
+    aoMudarOrig?.(ev);
+    if(gerador.preparandoTudo && ev.estado === 'gerando'){
+      info.textContent = `${info.textContent.split('—')[0].trim()} — frase ${ev.feito} de ${ev.total}`;
+    }
+  };
+
+  let r;
+  try{
+    r = await gerador.prepararLivroInteiro(estado.livro, estado.capIdx);
+  }catch(err){
+    r = {status: 'erro', erro: String(err?.message || err), feitos: 0, total: 0};
+  }finally{
+    gerador.aoMudar = aoMudarOrig;
+    gerador.aoPreparar = null;
+    btnParar.classList.add('oculto');
+    if(!estado.tocando && !estradaAberta()) soltarWakeLock();
+  }
+
+  const completo = r.status === 'completo';
+  if(completo) await gerador.marcarPreparado(estado.livro.id, true);
+  else if(r.feitos > 0) await gerador.marcarPreparado(estado.livro.id, true); // preserva o que deu
+
+  const msgs = {
+    completo: `Livro pronto ✓ ${r.feitos} capítulos com voz natural, prontos para a estrada.`,
+    parcial: `${r.feitos} de ${r.total} capítulos prontos. Alguns falharam — tente de novo depois.`,
+    'sem-espaco': `Espaço do aparelho acabou: ${r.feitos} de ${r.total} prontos. Apague algum livro e continue.`,
+    cancelado: `Parado por você: ${r.feitos} de ${r.total} capítulos já ficaram prontos.`,
+    incompativel: 'Esta voz não funciona com o motor do app. Escolha outra e tente de novo.',
+    ocupado: 'O motor está ocupado gerando áudio. Tente daqui a pouco.',
+    'ja-rodando': 'Já está preparando.',
+    erro: `Falhou: ${r.erro || ''}`
+  };
+  info.textContent = msgs[r.status] || `${r.feitos} de ${r.total} prontos.`;
+  $('preparo-barra').style.width = (r.total ? Math.round((r.feitos / r.total) * 100) : 0) + '%';
+  _atualizarBotaoPreparo();
+  mostrarUsoArmazenamento();
+  // com o áudio na mão, trocar já para a voz natural se estiver lendo
+  if(estado.tocando && !estado.modoAudio) _trocarParaPiperAgora();
 }
 
 /* Quanto o app está ocupando no aparelho — vozes + áudio gerado + livros. */
@@ -1160,6 +1320,8 @@ function ligarEventos(){
   $('btn-play').addEventListener('click', alternarPlay);
   $('btn-frase-ant').addEventListener('click', voltarFrase);
   $('btn-frase-prox').addEventListener('click', avancarFrase);
+  $('btn-voltar-15').addEventListener('click', () => saltarSegundos(-15));
+  $('btn-avancar-30').addEventListener('click', () => saltarSegundos(30));
   $('btn-cap-ant').addEventListener('click', () => mudarCapitulo(-1));
   $('btn-cap-prox').addEventListener('click', () => mudarCapitulo(1));
   $('sel-capitulo').addEventListener('change', (e) => trocarCapitulo(Number(e.target.value), 0));
@@ -1208,6 +1370,11 @@ function ligarEventos(){
   });
   $('btn-baixar-voz').addEventListener('click', baixarVozPiper);
   $('btn-apagar-voz')?.addEventListener('click', apagarVozPiper);
+  $('btn-preparar-livro')?.addEventListener('click', prepararLivroInteiro);
+  $('btn-parar-preparo')?.addEventListener('click', () => {
+    gerador.pararPreparo();
+    $('preparo-info').textContent = 'Parando…';
+  });
   $('sel-voz-sistema').addEventListener('change', (e) => {
     falaSistema.vozAtual = falaSistema.vozes[Number(e.target.value)] || null;
     falaSistema.vozDesejadaURI = falaSistema.vozAtual?.voiceURI || '';
@@ -1215,12 +1382,26 @@ function ligarEventos(){
     if(estado.tocando && !estado.modoAudio) tocarFraseSistema();
   });
   $('btn-config-voz').addEventListener('click', () => $('painel-voz').classList.toggle('oculto'));
+  $('chk-pular-citacoes')?.addEventListener('change', async (e) => {
+    window.PULAR_CITACOES = e.target.checked;
+    await bd.salvar('config', {chave: 'pularCitacoes', valor: e.target.checked});
+    if(!estado.livro) return;
+    // O texto falado mudou: o áudio já gerado não corresponde mais.
+    const estavaTocando = estado.tocando;
+    if(estavaTocando) pausar();
+    gerador.cancelarLivro(estado.livro.id);
+    try{ await gerador.apagarAudioLivro(estado.livro.id); }catch{}
+    prepararCapitulo();
+    agendarGeracao();
+    _atualizarBotaoPreparo();
+    if(estavaTocando) tocar();
+  });
 
   $('btn-modo-estrada').addEventListener('click', abrirEstrada);
   $('btn-sair-estrada').addEventListener('click', fecharEstrada);
   $('estrada-play').addEventListener('click', alternarPlay);
-  $('estrada-ant').addEventListener('click', voltarFrase);
-  $('estrada-prox').addEventListener('click', avancarFrase);
+  $('estrada-voltar-15').addEventListener('click', () => saltarSegundos(-15));
+  $('estrada-avancar-30').addEventListener('click', () => saltarSegundos(30));
   $('estrada-cap-ant').addEventListener('click', () => mudarCapitulo(-1));
   $('estrada-cap-prox').addEventListener('click', () => mudarCapitulo(1));
   $('estrada-vel').addEventListener('click', () => {
@@ -1276,6 +1457,7 @@ async function iniciar(){
       `<div class="aviso">Este navegador não permitiu armazenamento local — os livros valem só para esta sessão.</div>`;
   }
 
+  await gerador.carregarPreparados(); // livros já prontos para viagem
   piper.iniciar();
   // Se o motor neural quebrar (memória, modelo corrompido), avisar e seguir
   // lendo com a voz do sistema em vez de emudecer.
@@ -1302,6 +1484,11 @@ async function iniciar(){
 
   const cfgVozPiper = await bd.obter('config', 'vozPiper');
   if(cfgVozPiper?.valor) piper.vozId = cfgVozPiper.valor;
+
+  const cfgCit = await bd.obter('config', 'pularCitacoes');
+  window.PULAR_CITACOES = cfgCit?.valor !== false; // ligado por padrão
+  const chkCit = $('chk-pular-citacoes');
+  if(chkCit) chkCit.checked = window.PULAR_CITACOES;
 
   const cfgTaxa = await bd.obter('config', 'taxa');
   if(cfgTaxa?.valor){ falaSistema.taxa = cfgTaxa.valor; audioEl.playbackRate = cfgTaxa.valor; }

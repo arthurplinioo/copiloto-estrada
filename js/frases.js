@@ -54,6 +54,15 @@ function _chaveTitulo(s){
    corpo do texto, então sem isto o nome do capítulo nunca era lido em voz
    alta — o ouvinte pulava de um trecho a outro sem saber onde estava.
    Na tela o título aparece inteiro ("3. A Partida"); na fala, só o nome. */
+/* Preferência global: tirar referências e marcadores de nota da fala.
+   Fica em window para o app poder ligar/desligar sem recarregar. */
+function _pularCitacoes(){
+  return window.PULAR_CITACOES !== false; // ligado por padrão
+}
+function _falaLimpa(texto){
+  return _pularCitacoes() ? limparFalaCitacoes(texto) : texto;
+}
+
 function frasesDoCapitulo(cap){
   const frases = [];
   const tit = (cap.titulo || '').trim();
@@ -62,7 +71,7 @@ function frasesDoCapitulo(cap){
     const chaveTit = _chaveTitulo(tit);
     // não repetir quando o texto já começa com o próprio título (caso do EPUB)
     const jaNoTexto = chaveTit && _chaveTitulo(primeiroPar).startsWith(chaveTit);
-    const falado = tituloFalado(tit);
+    const falado = _falaLimpa(tituloFalado(tit));
     // títulos genéricos ("Trecho 4") não acrescentam nada à escuta
     const generico = /^trecho\s+\d+$/i.test(tit);
     if(!jaNoTexto && !generico && _chaveTitulo(falado)){
@@ -73,12 +82,12 @@ function frasesDoCapitulo(cap){
     const p = par.trim();
     if(!p) return;
     if(ehParagrafoTitulo(p)){
-      frases.push({texto: p, falado: tituloFalado(p), par: iPar, titulo: true});
+      frases.push({texto: p, falado: _falaLimpa(tituloFalado(p)), par: iPar, titulo: true});
     } else {
       for(const f of dividirFrases(p)){
         // Se uma frase começa com numeração de seção (1.2, 1.2.3, etc.), tirar da fala
-        const falado = /^\s*\d+(?:\.\d+)+\.?\s/.test(f) ? tituloFalado(f) : f;
-        frases.push({texto: f, falado, par: iPar, titulo: false});
+        const base = /^\s*\d+(?:\.\d+)+\.?\s/.test(f) ? tituloFalado(f) : f;
+        frases.push({texto: f, falado: _falaLimpa(base), par: iPar, titulo: false});
       }
     }
   });

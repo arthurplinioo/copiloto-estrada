@@ -86,6 +86,45 @@ console.log('== nome do capítulo é lido em voz alta ==');
     w.frasesDoCapitulo({titulo: 'Capítulo 5: O fim', texto: 'Corpo.'})[0].falado === 'Capítulo 5: O fim');
 }
 
+console.log('== ruído acadêmico sai da fala, não da tela ==');
+{
+  const f = w.limparFalaCitacoes;
+  // remove
+  verificar('remove (SILVA, 2020)', f('O consumo cresceu (SILVA, 2020).') === 'O consumo cresceu.');
+  verificar('remove citação com página',
+    f('Estudos (Silva & Souza, 2020, p. 45) confirmam.') === 'Estudos confirmam.');
+  verificar('remove citação múltipla',
+    f('Autores (cf. SILVA, 2020; SOUZA, 2019) discordam.') === 'Autores discordam.');
+  verificar('remove [12] e [1,2,3]',
+    f('Validado [12] e replicado [1,2,3].') === 'Validado e replicado.');
+  verificar('remove (Fig. 3)', f('A curva subiu (Fig. 3) e caiu.') === 'A curva subiu e caiu.');
+  verificar('remove marcador de nota', f('O dado foi negativo¹² naquele ano.') === 'O dado foi negativo naquele ano.');
+  verificar('remove ibid. sem deixar vírgula dupla',
+    f('Como dito, ibid., o dado não muda.') === 'Como dito, o dado não muda.');
+  // preserva
+  verificar('preserva parêntese comum',
+    f('Compramos o mais barato (custava menos da metade).') === 'Compramos o mais barato (custava menos da metade).');
+  verificar('preserva ano solto (data de nascimento)',
+    f('Nasceu em Lisboa (1920) e morreu no Porto.') === 'Nasceu em Lisboa (1920) e morreu no Porto.');
+  verificar('preserva explicação entre parênteses',
+    f('A taxa foi de 12,5 (doze vírgula cinco) por cento.').includes('doze vírgula cinco'));
+  verificar('frase que é só citação devolve o original', f('(SILVA, 2020)') === '(SILVA, 2020)');
+
+  // a TELA continua completa; só o 'falado' muda
+  const fr = w.frasesDoCapitulo({titulo: 'X', texto: 'O consumo cresceu (SILVA, 2020). Fim.'});
+  const comCit = fr.find(x => x.texto.includes('SILVA'));
+  verificar('texto na tela mantém a citação', !!comCit, '(nenhuma frase manteve o texto original)');
+  verificar('fala da mesma frase não tem a citação',
+    comCit && !comCit.falado.includes('SILVA'), `("${comCit?.falado}")`);
+
+  // desligável
+  w.PULAR_CITACOES = false;
+  const fr2 = w.frasesDoCapitulo({titulo: 'X', texto: 'O consumo cresceu (SILVA, 2020).'});
+  verificar('desligado, a citação volta para a fala',
+    fr2.some(x => x.falado.includes('SILVA')));
+  w.PULAR_CITACOES = true;
+}
+
 console.log('== WAV (concatenação de capítulo) ==');
 {
   const fmt = {canais: 1, taxa: 22050, bits: 16};

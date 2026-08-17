@@ -95,15 +95,28 @@
     <select class="sel-capitulo" id="sel-capitulo" aria-label="Capítulo"></select>
     <div class="estado-audio" id="estado-audio"></div>
 
+    <div class="preparo-viagem" id="preparo-viagem">
+      <div class="pv-linha">
+        <button class="btn" id="btn-preparar-livro">Preparar livro inteiro</button>
+        <button class="btn btn-quieto oculto" id="btn-parar-preparo">Parar</button>
+        <span class="num" id="preparo-info"></span>
+      </div>
+      <div class="barra-preparo oculto" id="barra-preparo"><i id="preparo-barra" style="width:0%"></i></div>
+    </div>
+
     <div class="texto-leitura" id="texto-leitura"></div>
 
     <div class="controles">
       <div class="linha-controles">
         <button class="ctl" id="btn-cap-ant" aria-label="Capítulo anterior">⇤</button>
-        <button class="ctl" id="btn-frase-ant" aria-label="Frase anterior">‹</button>
+        <button class="ctl" id="btn-voltar-15" aria-label="Voltar 15 segundos">↺<small>15</small></button>
         <button class="ctl ctl-play" id="btn-play" aria-label="Tocar ou pausar">▶</button>
-        <button class="ctl" id="btn-frase-prox" aria-label="Próxima frase">›</button>
+        <button class="ctl" id="btn-avancar-30" aria-label="Avançar 30 segundos">↻<small>30</small></button>
         <button class="ctl" id="btn-cap-prox" aria-label="Próximo capítulo">⇥</button>
+      </div>
+      <div class="linha-controles linha-frases">
+        <button class="ctl ctl-menor" id="btn-frase-ant" aria-label="Frase anterior">‹ frase</button>
+        <button class="ctl ctl-menor" id="btn-frase-prox" aria-label="Próxima frase">frase ›</button>
       </div>
       <div class="linha-ajustes">
         <span class="faixa-vel">
@@ -147,6 +160,10 @@
           </div>
           <p class="desc">Dica no iPhone: em Ajustes → Acessibilidade → Conteúdo Falado → Vozes → Português, baixe a "Luciana (Aprimorada)" — melhora muito e continua offline.</p>
         </div>
+        <label class="linha-check">
+          <input type="checkbox" id="chk-pular-citacoes" checked>
+          <span>Não ler referências e notas<small>Pula "(SILVA, 2020)", "[12]", "(Fig. 3)" na voz. O texto na tela continua completo.</small></span>
+        </label>
       </div>
 
       <div class="aviso oculto" id="aviso-ios">
@@ -165,9 +182,9 @@
   <div class="frase-grande" id="estrada-frase"></div>
   <div class="barra-cap"><i id="estrada-barra" style="width:0%"></i></div>
   <div class="grade-ctl">
-    <button class="gc" id="estrada-ant">‹<small>frase</small></button>
+    <button class="gc" id="estrada-voltar-15">↺<small>15 s</small></button>
     <button class="gc gc-play" id="estrada-play">▶</button>
-    <button class="gc" id="estrada-prox">›<small>frase</small></button>
+    <button class="gc" id="estrada-avancar-30">↻<small>30 s</small></button>
   </div>
   <div class="grade-ctl" style="margin-top:.8rem">
     <button class="gc" id="estrada-cap-ant">⇤<small>capítulo</small></button>

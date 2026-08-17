@@ -289,7 +289,12 @@ const gerador = {
   /* Um capítulo em WAV ocupa dezenas de MB. Guardamos só uma janela em volta
      de onde o leitor está; o resto é apagado para não estourar a cota do
      IndexedDB (era o que derrubava o app depois de alguns trechos). */
-  async limparForaDaJanela(livroId, capIdxAtual, antes = 1, depois = 3, preservar = null){
+  async limparForaDaJanela(livroId, capIdxAtual, antes = 1, depois = 3, preservar = null, forcar = false){
+    // Durante "preparar livro inteiro" a janela não vale: ela apagaria
+    // exatamente os capítulos que acabamos de gerar para a viagem.
+    if(this.preparandoTudo && !forcar) return;
+    // Livro preparado por inteiro: preservar, salvo em emergência de espaço.
+    if(this.livrosPreparados.has(livroId) && !forcar) return;
     try{
       const pref = `${livroId}:`;
       // 'preservar': capítulo em geração agora. Suas frases já sintetizadas não
@@ -347,6 +352,8 @@ const gerador = {
           if(!s.startsWith(`${livroAtualId}:`)){
             await bd.apagar(loja, c);
             this.prontos.delete(s);
+            const dono = s.split(':')[0];
+            if(this.livrosPreparados.delete(dono)) this._salvarPreparados();
           }
         }
       }
@@ -374,6 +381,135 @@ const gerador = {
   // Capítulo em que o leitor está agora — a limpeza de emergência por falta de
   // espaço precisa preservar a vizinhança DELE, não a do capítulo em geração.
   capLendo: 0,
+
+  /* ---------- preparar o livro inteiro ----------
+     No iOS a geração só roda com o app aberto na frente, então deixar o livro
+     pronto antes de viajar não é conforto: é o que faz o app servir no carro.
+     Enquanto 'preparandoTudo' está ligado, a limpeza por janela é suspensa —
+     senão ela apagaria justamente o que acabamos de gerar. */
+  preparandoTudo: false,
+  aoPreparar: null,     // callback de progresso da preparação completa
+  // Livros que o usuário mandou preparar por inteiro. A limpeza por janela não
+  // encosta neles: senão o áudio da viagem seria apagado no primeiro capítulo
+  // que ele ouvisse. Só a emergência real de espaço (forcar=true) os toca.
+  livrosPreparados: new Set(),
+
+  async carregarPreparados(){
+    try{
+      const c = await bd.obter('config', 'livrosPreparados');
+      if(Array.isArray(c?.valor)) this.livrosPreparados = new Set(c.valor);
+    }catch{}
+  },
+  async _salvarPreparados(){
+    try{
+      await bd.salvar('config', {chave: 'livrosPreparados', valor: [...this.livrosPreparados]});
+    }catch{}
+  },
+  async marcarPreparado(livroId, sim = true){
+    if(sim) this.livrosPreparados.add(livroId);
+    else this.livrosPreparados.delete(livroId);
+    await this._salvarPreparados();
+  },
+
+  /* Estimativa de espaço: o WAV é cru, 22050 Hz 16 bits mono ≈ 2,6 MB por
+     minuto de fala. Serve para avisar antes de encher o aparelho. */
+  estimarBytesLivro(livro){
+    let palavras = 0;
+    for(const c of livro.capitulos){
+      if(c.incluir === false) continue;
+      palavras += contarPalavras(c.texto || '');
+    }
+    const minutos = palavras / 165;          // ritmo de leitura em voz alta
+    return Math.round(minutos * 2.6 * 1048576);
+  },
+
+  async espacoLivre(){
+    try{
+      const e = await navigator.storage?.estimate?.();
+      if(e?.quota && e?.usage != null) return {livre: e.quota - e.usage, uso: e.usage, cota: e.quota};
+    }catch{}
+    return null;
+  },
+
+  /* Gera todos os capítulos incluídos, do atual em diante e depois os
+     anteriores. Para sozinho se o espaço acabar, dizendo até onde foi. */
+  async prepararLivroInteiro(livro, capInicial = 0){
+    if(this.preparandoTudo) return {status: 'ja-rodando'};
+    // Esperar a fila normal terminar e tomar o lugar dela: duas gerações em
+    // paralelo embaralhariam this.atual e o cancelamento.
+    for(let i = 0; this.ativo && i < 600; i++) await new Promise(r => setTimeout(r, 100));
+    if(this.ativo) return {status: 'ocupado'};
+    this.preparandoTudo = true;
+    this.ativo = true;
+    this.cancelarPreparo = false;
+    this.fila = [];
+    try{
+      const inc = livro.capitulos
+        .map((c, i) => (c.incluir === false ? -1 : i))
+        .filter(i => i >= 0);
+      const pos = Math.max(0, inc.indexOf(capInicial));
+      const ordem = [...inc.slice(pos), ...inc.slice(0, pos)]; // do ponto atual em diante
+      let feitos = 0, pulados = 0;
+
+      for(const capIdx of ordem){
+        if(this.cancelarPreparo) break;
+        const chave = this.chaveCap(livro.id, capIdx);
+        if(this.prontos.has(chave)){ feitos++; this.aoPreparar?.({feitos, total: ordem.length, capIdx, estado: 'pronto'}); continue; }
+
+        const jaTem = await bd.obter('capAudio', chave);
+        if(jaTem && jaTem.vozId === piper.vozId &&
+           jaTem.nFrases === frasesDoCapitulo(livro.capitulos[capIdx]).length){
+          this.prontos.add(chave);
+          feitos++;
+          this.aoPreparar?.({feitos, total: ordem.length, capIdx, estado: 'pronto'});
+          continue;
+        }
+
+        // espaço apertado: parar com dignidade em vez de estourar
+        const esp = await this.espacoLivre();
+        if(esp && esp.livre < 80 * 1048576){
+          this.aoPreparar?.({feitos, total: ordem.length, estado: 'sem-espaco'});
+          return {status: 'sem-espaco', feitos, total: ordem.length};
+        }
+
+        this.aoPreparar?.({feitos, total: ordem.length, capIdx, estado: 'gerando'});
+        // _gerarCapitulo lê this.atual para saber se foi cancelado
+        this.atual = {livroId: livro.id, capIdx, cancelado: false};
+        try{
+          await this._gerarCapitulo(livro, capIdx);
+          if(this.atual?.cancelado) break;
+          this.prontos.add(chave);
+          this.falhas.delete(chave);
+          feitos++;
+        }catch(err){
+          const msg = String(err?.message || err);
+          if(err?.incompativel){
+            this.aoPreparar?.({feitos, total: ordem.length, estado: 'erro', erro: msg, incompativel: true});
+            return {status: 'incompativel', feitos, total: ordem.length};
+          }
+          if(/quota|QuotaExceeded|espaço/i.test(msg)){
+            this.aoPreparar?.({feitos, total: ordem.length, estado: 'sem-espaco'});
+            return {status: 'sem-espaco', feitos, total: ordem.length};
+          }
+          pulados++;
+        }
+        this.aoPreparar?.({feitos, total: ordem.length, capIdx, estado: 'pronto'});
+      }
+      const status = this.cancelarPreparo ? 'cancelado' : (pulados ? 'parcial' : 'completo');
+      this.aoPreparar?.({feitos, total: ordem.length, estado: status, pulados});
+      return {status, feitos, total: ordem.length, pulados};
+    }finally{
+      this.preparandoTudo = false;
+      this.atual = null;
+      this.ativo = false;
+    }
+  },
+
+  cancelarPreparo: false,
+  pararPreparo(){
+    this.cancelarPreparo = true;
+    if(this.atual) this.atual.cancelado = true;
+  },
 
   async _rodar(){
     if(this.ativo) return;
@@ -430,8 +566,11 @@ const gerador = {
         // centrada em ONDE O LEITOR ESTÁ — centrar no capítulo em geração
         // (que vai até 2 à frente) apagava o áudio do capítulo tocando agora.
         if(/quota|QuotaExceeded|espaço/i.test(msg) && n < this.MAX_TENTATIVAS){
-          await this.limparForaDaJanela(livro.id, this.capLendo, 0, 1, capIdx);
+          // forcar=true: emergência de espaço passa por cima da preservação
+          await this.limparForaDaJanela(livro.id, this.capLendo, 0, 1, capIdx, true);
           await this.limparOutrosLivros(livro.id);
+          // o livro deixou de estar inteiro em disco
+          await this.marcarPreparado(livro.id, false);
           this.fila.unshift({livro, capIdx});
           continue;
         }
@@ -485,6 +624,7 @@ const gerador = {
 
   async apagarAudioLivro(livroId){
     this._esquecer(livroId);
+    this.marcarPreparado(livroId, false); // já não está inteiro em disco
     await bd.apagarPrefixo('capAudio', `${livroId}:`);
     await bd.apagarPrefixo('wavs', `${livroId}:`);
   }

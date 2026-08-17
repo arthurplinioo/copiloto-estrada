@@ -18,6 +18,45 @@ function tituloFalado(titulo){
   return t || titulo;
 }
 
+/* =====================================================================
+   Ruído acadêmico na FALA
+   Referências, marcadores de nota e chamadas de figura atrapalham a escuta
+   ("...cresceu no período abre parênteses SILVA vírgula 2020 vírgula página
+   45 fecha parênteses..."). Some da voz; a tela continua mostrando tudo.
+   ===================================================================== */
+
+// (SILVA, 2020) · (Silva & Souza, 2020, p. 45) · (cf. SILVA, 2020; SOUZA, 2019)
+// Exige NOME + ano dentro do parêntese. Só o ano não basta: "(1920)" costuma ser
+// data de nascimento e precisa continuar sendo lido.
+const RE_CITACAO_PAREN = /\s*\((?=[^()]*\b(?:1[0-9]|20)\d{2}[a-z]?\b)(?=[^()]*\p{L}{2})[^()]{0,160}\)/gu;
+// [12] · [1,2] · [12-15] · [1; 4] — chamadas numéricas de referência
+const RE_CITACAO_COLCH = /\s*\[\s*\d{1,4}(?:\s*[–—,;-]\s*\d{1,4})*\s*\]/g;
+// (Fig. 3) · (Tabela 2) · (Quadro 1.4) — só entre parênteses; "Figura 3" solta fica
+const RE_CHAMADA_FIG = /\s*\((?:v\.?\s*)?(?:fig(?:ura)?|tab(?:ela)?|quadro|gr[áa]fico|graf|anexo|ap[êe]ndice)\.?\s*\d+[.\d]*\s*\)/gi;
+// marcador de nota colado na palavra: "resultado¹²" ou "resultado*"
+const RE_NOTA_SOBRE = /(\p{L})[¹²³⁰-₟]+/gu;
+// ibid., op. cit., et al. — abreviações que a voz lê letra a letra
+const RE_ABREV_REF = /\s*\b(?:ibid|op\.?\s*cit|loc\.?\s*cit|apud|et\s+al)\.?(?=[\s,;.)]|$)/gi;
+
+function limparFalaCitacoes(texto){
+  let t = String(texto || '')
+    .replace(RE_CITACAO_PAREN, '')
+    .replace(RE_CITACAO_COLCH, '')
+    .replace(RE_CHAMADA_FIG, '')
+    .replace(RE_NOTA_SOBRE, '$1')
+    .replace(RE_ABREV_REF, '');
+  // costurar o que sobrou solto: " ." → "." ; ",," → "," ; "( )" → ""
+  t = t.replace(/\s+([.,;:!?…])/g, '$1')
+       .replace(/\(\s*\)|\[\s*\]/g, '')
+       .replace(/([.,;:])\s*(?:[.,;:]\s*)+/g, '$1 ')  // ",," e ",." viram um só
+       .replace(/\s{2,}/g, ' ')
+       .replace(/\s+$/, '')
+       .trim();
+  // Se sobrou só pontuação (a frase era só a citação), devolver o original —
+  // melhor ler algo estranho do que pular a frase inteira em silêncio.
+  return /\p{L}|\d/u.test(t) ? t : String(texto || '').trim();
+}
+
 /* Um parágrafo que é um título de seção: curto, sem pontuação final,
    numerado ("1.2 Alguma coisa") ou casando RE_TITULO ou todo em maiúsculas. */
 function ehParagrafoTitulo(p){
@@ -302,6 +341,7 @@ function executarLimpeza(bruto, regras){
 
 Object.assign(window, {
   contarPalavras, RE_TITULO, tituloFalado, ehParagrafoTitulo, ehNumeroPagina, RE_NUM_PAG,
+  limparFalaCitacoes,
   regraCabecalhoRodape, regraNumeroPagina, regraNotasRodape, regraHifenizacao, regraParagrafos,
   regraEspacos, detectarCapitulosTexto, dividirPorTamanho, classificarCapitulo,
   REGRAS_PADRAO, executarLimpeza, tamanhoCorpo

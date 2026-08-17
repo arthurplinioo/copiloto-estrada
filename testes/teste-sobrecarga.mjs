@@ -436,5 +436,145 @@ console.log('== fim de mídia detectado mesmo sem a flag ended ==');
   verificar('pause no meio ainda pausa de verdade', r.pausouNoMeio);
 }
 
+// ---------- salto por tempo (voltar 15s / avançar 30s) ----------
+console.log('== salto por tempo ==');
+{
+  ev('pausar(); falaSistema.parar(); estado.tocando=false; estado.modoAudio=false;');
+  await espera(60);
+  const r = await ev(`(async () => {
+    gerador.pedir = () => {};
+    estado.motor='piper'; piper.disponivel=true;
+    piper.vozId='pt_BR-faber-medium'; estado.vozPiperPronta=true;
+    estado.capIdx = 3; prepararCapitulo(); estado.fraseIdx = 0;
+    const n = estado.frases.length;
+    await bd.salvar('capAudio', {chave: gerador.chaveCap('sobrecarga', 3),
+      wav: montarWav({canais:1,taxa:22050,bits:16},[new Uint8Array(4410)]),
+      mapa: estado.frases.map((_, k) => ({inicio: k*10, dur: 10})),
+      duracao: n*10, vozId: piper.vozId, nFrases: n});
+    estado.tocando = true;
+    await _iniciarCapitulo();
+    // linha do tempo controlada pelo teste
+    let t = 40;
+    Object.defineProperty(audioEl, 'currentTime', {configurable:true, get:()=>t, set:(v)=>{t=v;}});
+    Object.defineProperty(audioEl, 'duration', {configurable:true, get:()=>n*10});
+    const depoisVoltar = (saltarSegundos(-15), t);
+    const depoisAvancar = (saltarSegundos(30), t);
+    return {modoAudio: estado.modoAudio, depoisVoltar, depoisAvancar, capIdx: estado.capIdx};
+  })()`);
+  verificar('entrou em modo áudio para o teste', r.modoAudio === true);
+  verificar('voltar 15s recua 15 segundos', r.depoisVoltar === 25, `(t=${r.depoisVoltar})`);
+  verificar('avançar 30s adianta 30 segundos', r.depoisAvancar === 55, `(t=${r.depoisAvancar})`);
+  verificar('salto não trocou de capítulo', r.capIdx === 3);
+
+  // no fim da mídia, avançar deve mudar de capítulo em vez de estourar
+  const passouCap = await ev(`(() => {
+    const antes = estado.capIdx;
+    audioEl.currentTime = audioEl.duration - 2;
+    saltarSegundos(30);
+    return estado.capIdx !== antes;
+  })()`);
+  verificar('avançar no fim do capítulo passa para o próximo', passouCap);
+
+  // antes do início, voltar deve recuar de capítulo
+  const voltouCap = await ev(`(() => {
+    const antes = estado.capIdx;
+    audioEl.currentTime = 1;
+    saltarSegundos(-15);
+    return estado.capIdx !== antes;
+  })()`);
+  verificar('voltar no início do capítulo volta ao anterior', voltouCap);
+
+  // Voz do sistema: sem linha do tempo, o salto anda por frases estimadas pelo
+  // número de palavras. Partindo do meio do capítulo, não deve trocar de trecho.
+  const sistema = await ev(`(() => {
+    estado.modoAudio = false; estado.tocando = false;
+    estado.capIdx = 5; prepararCapitulo();
+    const ultima = estado.frases.length - 1;
+    estado.fraseIdx = ultima;
+    const capAntes = estado.capIdx;
+    saltarSegundos(-15);
+    const recuou = estado.fraseIdx < ultima && estado.capIdx === capAntes;
+    const posRecuo = estado.fraseIdx;
+    saltarSegundos(15);
+    const avancou = estado.fraseIdx > posRecuo || estado.capIdx !== capAntes;
+    return {recuou, avancou, ultima, posRecuo, cap: estado.capIdx, capAntes};
+  })()`);
+  verificar('voz do sistema: voltar 15s recua frases sem trocar de capítulo',
+    sistema.recuou, `(de ${sistema.ultima} para ${sistema.posRecuo}, cap ${sistema.capAntes}→${sistema.cap})`);
+  verificar('voz do sistema: avançar 15s adianta a leitura', sistema.avancou);
+
+  // Perto do começo do capítulo, voltar 15s cruza para o trecho anterior —
+  // é o comportamento certo: 15 segundos atrás realmente estavam lá.
+  const cruzou = await ev(`(() => {
+    estado.modoAudio = false; estado.tocando = false;
+    estado.capIdx = 5; prepararCapitulo(); estado.fraseIdx = 0;
+    const antes = estado.capIdx;
+    saltarSegundos(-15);
+    return estado.capIdx < antes;
+  })()`);
+  verificar('voltar 15s no começo do capítulo cruza para o anterior', cruzou);
+}
+
+// ---------- preparar livro inteiro ----------
+console.log('== preparar livro inteiro ==');
+{
+  const r = await ev(`(async () => {
+    // gerar rápido e sem worker
+    gerador._gerarCapitulo = async (livro, capIdx) => {
+      await bd.salvar('capAudio', {chave: gerador.chaveCap(livro.id, capIdx),
+        wav: new ArrayBuffer(64), mapa: [{inicio:0,dur:1}], duracao: 1,
+        vozId: piper.vozId, nFrases: frasesDoCapitulo(livro.capitulos[capIdx]).length});
+    };
+    gerador.prontos.clear(); gerador.falhas.clear();
+    await bd.apagarPrefixo('capAudio', 'sobrecarga:');
+    const eventos = [];
+    gerador.aoPreparar = (e) => eventos.push(e.estado);
+    const res = await gerador.prepararLivroInteiro(estado.livro, 0);
+    gerador.aoPreparar = null;
+    const chaves = (await bd.chaves('capAudio')).filter(c => String(c).startsWith('sobrecarga:'));
+    return {res, gerados: chaves.length, avisou: eventos.includes('gerando'),
+            terminou: eventos[eventos.length-1]};
+  })()`);
+  verificar('preparou todos os capítulos', r.res.status === 'completo',
+    `(status=${r.res.status})`);
+  verificar(`gerou os ${N_CAPITULOS} capítulos`, r.gerados === N_CAPITULOS,
+    `(${r.gerados} em disco)`);
+  verificar('informou o progresso durante o preparo', r.avisou);
+  verificar('avisou a conclusão', r.terminou === 'completo', `(${r.terminou})`);
+
+  // a limpeza por janela NÃO pode apagar o livro preparado
+  const sobreviveu = await ev(`(async () => {
+    await gerador.marcarPreparado('sobrecarga', true);
+    await gerador.limparForaDaJanela('sobrecarga', 0);   // uso normal
+    const depois = (await bd.chaves('capAudio')).filter(c => String(c).startsWith('sobrecarga:')).length;
+    return depois;
+  })()`);
+  verificar('limpeza normal preserva o livro preparado', sobreviveu === N_CAPITULOS,
+    `(sobraram ${sobreviveu})`);
+
+  // mas a emergência de espaço ainda pode limpar
+  const emergencia = await ev(`(async () => {
+    await gerador.limparForaDaJanela('sobrecarga', 0, 0, 1, null, true); // forcar
+    const depois = (await bd.chaves('capAudio')).filter(c => String(c).startsWith('sobrecarga:')).length;
+    return depois;
+  })()`);
+  verificar('emergência de espaço ainda consegue limpar', emergencia < N_CAPITULOS,
+    `(sobraram ${emergencia})`);
+
+  // marca sobrevive ao recarregar (fica no banco)
+  const persistiu = await ev(`(async () => {
+    await gerador.marcarPreparado('sobrecarga', true);
+    gerador.livrosPreparados = new Set();
+    await gerador.carregarPreparados();
+    return gerador.livrosPreparados.has('sobrecarga');
+  })()`);
+  verificar('marca de "livro preparado" persiste entre sessões', persistiu);
+
+  // estimativa de espaço é plausível
+  const est = ev(`gerador.estimarBytesLivro(estado.livro)`);
+  verificar('estimativa de tamanho é plausível', est > 1048576 && est < 5e9,
+    `(${Math.round(est/1048576)} MB)`);
+}
+
 console.log(falhas.length ? `\n${falhas.length} FALHA(S)` : '\nSOBRECARGA OK');
 process.exit(falhas.length ? 1 : 0);
