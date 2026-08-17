@@ -379,9 +379,11 @@ function prepararCapitulo(){
 function desenharCapitulo(){
   const alvo = $('texto-leitura');
   alvo.innerHTML = '';
-  let parAtual = -1, pEl = null;
+  // NaN como sentinela: qualquer índice de parágrafo difere dele. Usar -1 aqui
+  // colidia com o parágrafo do título do capítulo e deixava pEl nulo.
+  let parAtual = NaN, pEl = null;
   estado.frases.forEach((f, i) => {
-    if(f.par !== parAtual){
+    if(f.par !== parAtual || !pEl){
       parAtual = f.par;
       pEl = document.createElement(f.titulo ? 'h3' : 'p');
       alvo.appendChild(pEl);

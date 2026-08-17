@@ -166,6 +166,7 @@ const piper = {
     try{ this.worker?.terminate(); }catch{}
     this.worker = null;
     this.pronto = false;
+    this._geradasNesteWorker = 0;
     for(const p of this.pendentes.values()) p.rej(new Error('Motor de voz reiniciado.'));
     this.pendentes.clear();
     return this.iniciar();
@@ -209,18 +210,22 @@ const piper = {
     this.reiniciar();
   },
 
-  // O vits-web cria uma InferenceSession por frase e nunca a libera. Reciclar
-  // o worker a cada N frases devolve essa memória ao sistema — sem isto a aba
-  // morria depois de algumas dezenas de frases (com qualquer voz).
-  FRASES_POR_WORKER: 24,
+  // O worker reaproveita uma única InferenceSession por voz (ver o patch em
+  // src-worker/piper-worker.src.js), então o vazamento do vits-web não existe
+  // mais. Estes dois campos são só uma rede de segurança: se por algum motivo
+  // o patch não pegar, o worker ainda é reciclado antes de a memória apertar.
+  FRASES_POR_WORKER: 40,
   _geradasNesteWorker: 0,
+  _patchConfirmado: false,
 
   async gerar(texto){
-    if(this._geradasNesteWorker >= this.FRASES_POR_WORKER){
+    // Com o patch ativo não há acúmulo: reciclar só faria a leitura engasgar.
+    if(!this._patchConfirmado && this._geradasNesteWorker >= this.FRASES_POR_WORKER){
       this.reiniciar();
       this._geradasNesteWorker = 0;
     }
     const r = await this._chamar({tipo: 'gerar', texto, vozId: this.vozId}, 300000);
+    if(r.sessaoReaproveitada) this._patchConfirmado = true;
     this._geradasNesteWorker++;
     return r.buf;
   }

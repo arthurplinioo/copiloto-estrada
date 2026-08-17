@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node testes/teste-parsers.mjs && node testes/teste-regras.mjs && node testes/teste-fluxo.mjs && node testes/teste-player.mjs",
+    "test": "node testes/teste-parsers.mjs && node testes/teste-regras.mjs && node testes/teste-fluxo.mjs && node testes/teste-player.mjs && node testes/teste-sobrecarga.mjs",
     "bundle": "esbuild src-worker/piper-worker.src.js --bundle --format=iife --minify --external:fs --external:path --outfile=js/piper-worker.bundle.js",
     "icones": "node ferramentas/gerar-icones.mjs",
     "dados-teste": "node ferramentas/gerar-dados-teste.mjs"

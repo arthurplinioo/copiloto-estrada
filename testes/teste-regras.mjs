@@ -51,9 +51,39 @@ verificar('"2.3. Métodos" fala "Métodos"', w.tituloFalado('2.3. Métodos') ===
 verificar('"III — A viagem" fala "A viagem"', w.tituloFalado('III — A viagem') === 'A viagem');
 verificar('"Capítulo 1: A hipótese" mantém', w.tituloFalado('Capítulo 1: A hipótese') === 'Capítulo 1: A hipótese');
 {
+  // frases[0] é o nome do capítulo (ver "nome do capítulo é lido" abaixo);
+  // o cabeçalho de seção do corpo vem logo depois, também sem numeração.
   const frases = w.frasesDoCapitulo({titulo: 'X', texto: '1.2 Resultados obtidos\n\nO estudo mostrou o esperado. Nada mudou.'});
-  verificar('parágrafo-título vira 1 frase com fala limpa', frases[0].titulo && frases[0].falado === 'Resultados obtidos', JSON.stringify(frases[0]));
-  verificar('demais frases normais', frases.length === 3);
+  verificar('nome do capítulo abre a leitura', frases[0].titulo && frases[0].falado === 'X', JSON.stringify(frases[0]));
+  verificar('parágrafo-título vira 1 frase com fala limpa', frases[1].titulo && frases[1].falado === 'Resultados obtidos', JSON.stringify(frases[1]));
+  verificar('demais frases normais', frases.length === 4, `(veio ${frases.length})`);
+}
+
+console.log('== nome do capítulo é lido em voz alta ==');
+{
+  const caps = w.detectarCapitulosTexto(
+    '1. A Partida\n\nO caminhao subia a serra. A noite caia devagar.\n\n' +
+    '2. O Rio\n\nA agua estava fria naquele dia de julho.');
+  const fr = w.frasesDoCapitulo(caps[0]);
+  verificar('título entra como primeira frase', fr[0]?.titulo === true);
+  verificar('fala o nome sem o número', fr[0]?.falado === 'A Partida', `("${fr[0]?.falado}")`);
+  verificar('tela mostra o título completo', fr[0]?.texto === '1. A Partida', `("${fr[0]?.texto}")`);
+  verificar('corpo do capítulo vem depois', fr[1]?.falado.startsWith('O caminhao'));
+
+  // EPUB: título já dentro do texto não pode ser lido duas vezes
+  const fr2 = w.frasesDoCapitulo({titulo: 'A partida', texto: 'A partida\n\nEle saiu cedo.'});
+  verificar('não repete título já presente no texto',
+    fr2.filter(f => /partida/i.test(f.falado)).length === 1);
+
+  // títulos genéricos não acrescentam nada à escuta
+  const fr3 = w.frasesDoCapitulo({titulo: 'Trecho 4', texto: 'Texto qualquer aqui.'});
+  verificar('não fala "Trecho 4"', !fr3.some(f => /trecho/i.test(f.falado)));
+
+  // numeração romana e de seção também saem só da fala
+  verificar('"III — A viagem" fala só o nome',
+    w.frasesDoCapitulo({titulo: 'III — A viagem', texto: 'Corpo.'})[0].falado === 'A viagem');
+  verificar('"Capítulo 5: O fim" mantém a palavra Capítulo',
+    w.frasesDoCapitulo({titulo: 'Capítulo 5: O fim', texto: 'Corpo.'})[0].falado === 'Capítulo 5: O fim');
 }
 
 console.log('== WAV (concatenação de capítulo) ==');

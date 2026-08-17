@@ -42,9 +42,33 @@ function dividirFrases(paragrafo){
   return finais;
 }
 
-/* Frases de um capítulo: [{texto, falado, par, titulo}] */
+/* Normaliza para comparar título com o começo do texto (acento, caixa, pontuação) */
+function _chaveTitulo(s){
+  return String(s || '')
+    .normalize('NFD').replace(/\p{M}+/gu, '')
+    .toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+/* Frases de um capítulo: [{texto, falado, par, titulo}]
+   O título entra como primeira frase: a detecção de capítulos o retira do
+   corpo do texto, então sem isto o nome do capítulo nunca era lido em voz
+   alta — o ouvinte pulava de um trecho a outro sem saber onde estava.
+   Na tela o título aparece inteiro ("3. A Partida"); na fala, só o nome. */
 function frasesDoCapitulo(cap){
   const frases = [];
+  const tit = (cap.titulo || '').trim();
+  if(tit){
+    const primeiroPar = cap.texto.split(/\n\n+/).find(p => p.trim()) || '';
+    const chaveTit = _chaveTitulo(tit);
+    // não repetir quando o texto já começa com o próprio título (caso do EPUB)
+    const jaNoTexto = chaveTit && _chaveTitulo(primeiroPar).startsWith(chaveTit);
+    const falado = tituloFalado(tit);
+    // títulos genéricos ("Trecho 4") não acrescentam nada à escuta
+    const generico = /^trecho\s+\d+$/i.test(tit);
+    if(!jaNoTexto && !generico && _chaveTitulo(falado)){
+      frases.push({texto: tit, falado, par: -1, titulo: true});
+    }
+  }
   cap.texto.split(/\n\n+/).forEach((par, iPar) => {
     const p = par.trim();
     if(!p) return;

@@ -7,8 +7,55 @@
 // depois de algumas dezenas de frases o navegador mata a aba. A thread principal
 // contorna isso reciclando este worker de tempos em tempos (ver piper.gerar).
 import * as tts from '@diffusionstudio/vits-web';
+import * as ort from 'onnxruntime-web';
 
 const post = (m, t) => self.postMessage(m, t || []);
+
+/* ---------------------------------------------------------------------------
+   Correção do vazamento do vits-web.
+
+   predict() faz InferenceSession.create() a CADA frase e nunca libera — a
+   biblioteca não tem uma única chamada de release/dispose. Cada sessão guarda
+   o modelo (~60 MB) no heap do WASM, então o consumo cresce sem parar até o
+   navegador matar a aba.
+
+   Como o worker é empacotado junto com o vits-web, o `import("onnxruntime-web")`
+   dele resolve para este mesmo módulo. Envolvemos InferenceSession.create para
+   reaproveitar UMA sessão por voz: acaba o vazamento e cada frase fica mais
+   rápida (não recria a sessão nem relê o modelo do OPFS).
+--------------------------------------------------------------------------- */
+let vozCorrente = null;          // voz da chamada em andamento
+let sessaoCache = null;          // {vozId, sessao}
+let patchAplicado = false;
+
+function aplicarPatchSessao(){
+  try{
+    const alvo = ort?.InferenceSession;
+    if(!alvo || typeof alvo.create !== 'function') return false;
+    const criarOriginal = alvo.create.bind(alvo);
+    alvo.create = async (modelo, opcoes) => {
+      const vozId = vozCorrente;
+      if(sessaoCache && sessaoCache.vozId === vozId && vozId != null){
+        return sessaoCache.sessao; // reaproveita — aqui morria a memória
+      }
+      if(sessaoCache?.sessao?.release){
+        try{ await sessaoCache.sessao.release(); }catch{}
+      }
+      sessaoCache = null;
+      const sessao = await criarOriginal(modelo, opcoes);
+      sessaoCache = {vozId, sessao};
+      return sessao;
+    };
+    return true;
+  }catch{ return false; }
+}
+
+async function liberarSessao(){
+  if(sessaoCache?.sessao?.release){
+    try{ await sessaoCache.sessao.release(); }catch{}
+  }
+  sessaoCache = null;
+}
 
 // Vozes pt-BR que o vits-web não consegue sintetizar: o phonemizador usa a
 // tabela de fonemas padrão do Piper e ignora o phoneme_id_map do modelo, então
@@ -47,6 +94,8 @@ self.onmessage = async (e) => {
       post({ tipo: 'download-pronto', reqId: m.reqId, vozId: m.vozId });
 
     } else if (m.tipo === 'remover') {
+      // soltar o modelo antes de apagar, senão o arquivo fica preso no OPFS
+      if (vozCorrente === m.vozId) { await liberarSessao(); vozCorrente = null; }
       await tts.remove(m.vozId);
       // Conferir de verdade: se o arquivo continuar lá, o botão "apagar voz"
       // mentia para o usuário. Acontecia quando o modelo ainda estava carregado.
@@ -54,6 +103,7 @@ self.onmessage = async (e) => {
       post({ tipo: 'removida', reqId: m.reqId, vozId: m.vozId, restou });
 
     } else if (m.tipo === 'limpar-tudo') {
+      await liberarSessao(); vozCorrente = null;
       await tts.flush(); // apaga a pasta inteira de modelos
       post({ tipo: 'limpo', reqId: m.reqId });
 
@@ -61,9 +111,12 @@ self.onmessage = async (e) => {
       if (INCOMPATIVEIS.has(m.vozId)) {
         throw new Error(`A voz ${m.vozId} não funciona neste motor (tabela de fonemas incompatível).`);
       }
+      if (!patchAplicado) patchAplicado = aplicarPatchSessao();
+      if (vozCorrente !== m.vozId) await liberarSessao();
+      vozCorrente = m.vozId;
       const wav = await tts.predict({ text: m.texto, voiceId: m.vozId });
       const buf = await wav.arrayBuffer();
-      post({ tipo: 'wav', reqId: m.reqId, buf }, [buf]);
+      post({ tipo: 'wav', reqId: m.reqId, buf, sessaoReaproveitada: patchAplicado }, [buf]);
     }
   } catch (err) {
     const msg = String(err?.message || err);
