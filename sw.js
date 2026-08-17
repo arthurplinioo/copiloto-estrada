@@ -25,9 +25,16 @@ const CONCHA = [
   'icones/icone-180.png'
 ];
 // Bump this string on every deploy to invalidate the old cache.
-const VERSAO = 'copiloto-v10';
+const VERSAO = 'copiloto-v11';
 
 const HOSTS_CDN = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com'];
+
+/* Runtime do motor neural (onnxruntime + phonemize) fica num cache SEPARADO e
+   sem versão. Ele estava junto da concha, e como o activate apaga toda chave
+   antiga, cada atualização do app jogava fora o runtime já baixado — quem
+   atualizasse e saísse para a estrada ficava sem voz neural. Os arquivos têm
+   versão na própria URL, então o cache pode viver para sempre. */
+const CACHE_MOTOR = 'copiloto-motor';
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSAO).then(c => c.addAll(CONCHA)).then(() => self.skipWaiting()));
@@ -36,7 +43,9 @@ self.addEventListener('install', (e) => {
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
-      .then(chaves => Promise.all(chaves.filter(k => k !== VERSAO).map(k => caches.delete(k))))
+      .then(chaves => Promise.all(
+        chaves.filter(k => k !== VERSAO && k !== CACHE_MOTOR).map(k => caches.delete(k))
+      ))
       .then(() => self.clients.claim())
   );
 });
@@ -50,8 +59,12 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(
       caches.match(e.request).then(cacheado => {
         const rede = fetch(e.request).then(resp => {
-          if(resp.ok) caches.open(VERSAO).then(c => c.put(e.request, resp.clone())).catch(() => {});
-          return resp.clone();
+          if(resp.ok){
+            const copia = resp.clone();
+            // waitUntil: sem isto o SW podia ser encerrado antes de gravar
+            e.waitUntil(caches.open(VERSAO).then(c => c.put(e.request, copia)).catch(() => {}));
+          }
+          return resp;
         }).catch(() => cacheado);
         return cacheado || rede;
       })
@@ -59,14 +72,15 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // CDNs do motor neural: cache-first (imutáveis, com versão na URL)
+  // CDNs do motor neural: cache-first, em cache próprio que sobrevive a deploys
   if(HOSTS_CDN.includes(url.hostname)){
     e.respondWith(
       caches.match(e.request).then(cacheado => cacheado || fetch(e.request).then(resp => {
         if(resp.ok){
-          caches.open(VERSAO).then(c => c.put(e.request, resp.clone())).catch(() => {});
+          const copia = resp.clone();
+          e.waitUntil(caches.open(CACHE_MOTOR).then(c => c.put(e.request, copia)).catch(() => {}));
         }
-        return resp.clone();
+        return resp;
       }))
     );
   }

@@ -226,5 +226,88 @@ console.log('== troca de voz durante a leitura não derruba ==');
     `(${ev('JSON.stringify(window.__erros.slice(0,3))')})`);
 }
 
+// ---------- falhas do armazenamento não podem emudecer a leitura ----------
+console.log('== banco falhando no meio da leitura ==');
+{
+  await ev(`(async () => {
+    estado.capIdx = 0; prepararCapitulo(); estado.fraseIdx = 0;
+    window.__erros = [];
+    window.__obterReal = bd.obter.bind(bd);
+    await tocar();
+  })()`);
+  await espera(150);
+  // IndexedDB recusando (cota/pressão de espaço no iOS) na troca de capítulo
+  ev(`bd.obter = async (loja, chave) => {
+        if(loja === 'capAudio') throw new Error('UnknownError: quota');
+        return window.__obterReal(loja, chave);
+      }`);
+  ev(`Object.defineProperty(audioEl, 'ended', {value: true, configurable: true});
+      audioEl.dispatchEvent(new Event('pause'));
+      audioEl.dispatchEvent(new Event('ended'));
+      Object.defineProperty(audioEl, 'ended', {value: false, configurable: true});`);
+  await espera(200);
+  verificar('erro do banco não derruba a leitura', ev('estado.tocando') === true,
+    `(tocando=${ev('estado.tocando')})`);
+  verificar('caiu para a voz do sistema', ev('estado.modoAudio') === false);
+  verificar('nenhum erro solto escapou', ev('window.__erros.length') === 0,
+    `(${ev('JSON.stringify(window.__erros.slice(0,2))')})`);
+  ev('bd.obter = window.__obterReal');
+}
+
+// ---------- correções apontadas na revisão sênior ----------
+console.log('== proteções de armazenamento e memória ==');
+{
+  // limpeza de emergência centra em onde o leitor ESTÁ, não no capítulo gerado
+  const preservou = await ev(`(async () => {
+    for(const i of [3, 4, 5, 9]){
+      await bd.salvar('capAudio', {chave: gerador.chaveCap('emerg', i), wav: new ArrayBuffer(32),
+                                   mapa: [], duracao: 1, vozId: 'x', nFrases: 1});
+    }
+    gerador.capLendo = 4;
+    await gerador.limparForaDaJanela('emerg', gerador.capLendo, 0, 1);
+    const k = await bd.chaves('capAudio');
+    return {atual: k.includes('emerg:4'), proximo: k.includes('emerg:5'), longe: k.includes('emerg:9')};
+  })()`);
+  verificar('emergência preserva o capítulo em leitura', preservou.atual);
+  verificar('emergência preserva o próximo', preservou.proximo);
+  verificar('emergência descarta o que está longe', !preservou.longe);
+
+  // áudio de outros livros é liberado
+  const limpou = await ev(`(async () => {
+    // estado próprio, sem depender do que sobrou das etapas anteriores
+    await bd.salvar('capAudio', {chave: 'outroLivro:0', wav: new ArrayBuffer(32),
+                                 mapa: [], duracao: 1, vozId: 'x', nFrases: 1});
+    await bd.salvar('capAudio', {chave: 'sobrecarga:0', wav: new ArrayBuffer(32),
+                                 mapa: [], duracao: 1, vozId: 'x', nFrases: 1});
+    await bd.salvar('wavs', {chave: 'outroLivro:0:0', buf: new ArrayBuffer(16)});
+    await gerador.limparOutrosLivros('sobrecarga');
+    const k = await bd.chaves('capAudio');
+    const kw = await bd.chaves('wavs');
+    return {saiu: !k.includes('outroLivro:0'),
+            ficou: k.includes('sobrecarga:0'),
+            frasesSoltasSairam: !kw.includes('outroLivro:0:0')};
+  })()`);
+  verificar('áudio de outro livro é liberado', limpou.saiu);
+  verificar('áudio do livro aberto é preservado', limpou.ficou);
+  verificar('frases soltas de outro livro também saem', limpou.frasesSoltasSairam);
+
+  // o gerador não pode travar para sempre se algo lançar no laço
+  const destravou = await ev(`(async () => {
+    const aoMudarOrig = gerador.aoMudar;
+    gerador.aoMudar = () => { throw new Error('explodiu na UI'); };
+    gerador.falhas.clear();
+    try{ await gerador._rodar(); }catch{}
+    gerador.aoMudar = aoMudarOrig;
+    return gerador.ativo === false;
+  })()`);
+  verificar('gerador não trava após exceção no laço', destravou);
+
+  // reciclagem do worker nunca é desligada (phonemizador ainda vaza por frase)
+  verificar('reciclagem do worker continua ativa mesmo com o patch',
+    ev('piper._limiteReciclagem()') > 0 && ev('piper.FRASES_POR_WORKER_SEM_PATCH') < ev('piper.FRASES_POR_WORKER'));
+  verificar('patch só é confirmado por reaproveitamento real',
+    ev('piper._patchConfirmado') === false);
+}
+
 console.log(falhas.length ? `\n${falhas.length} FALHA(S)` : '\nSOBRECARGA OK');
 process.exit(falhas.length ? 1 : 0);

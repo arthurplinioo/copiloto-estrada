@@ -55,6 +55,9 @@ audioEl.preload = 'auto';
    Wake lock (necessário só para o motor do sistema e Modo Estrada)
    ===================================================================== */
 async function pedirWakeLock(){
+  // soltar o anterior antes de pedir outro: alternar visibilidade várias vezes
+  // acumulava sentinelas de tela ligada, que nunca eram liberadas
+  if(estado.wakeLock){ try{ await estado.wakeLock.release(); }catch{} estado.wakeLock = null; }
   try{ if('wakeLock' in navigator) estado.wakeLock = await navigator.wakeLock.request('screen'); }catch{}
 }
 function soltarWakeLock(){
@@ -459,7 +462,10 @@ audioEl.addEventListener('timeupdate', () => {
   }
 });
 audioEl.addEventListener('ended', () => {
-  if(!estado.modoAudio) return;
+  // Sem o guard de 'tocando', um 'ended' já enfileirado quando o timer de
+  // dormir (ou uma pausa manual) cai avançava o capítulo e salvava o progresso
+  // adiante — o usuário acordava com o livro fora do lugar.
+  if(!estado.modoAudio || !estado.tocando) return;
   avancarCapituloAuto();
 });
 audioEl.addEventListener('error', () => {
@@ -484,6 +490,11 @@ audioEl.addEventListener('pause', () => {
 });
 
 /* ---------- via sistema (speechSynthesis) ---------- */
+// Falhas seguidas da voz do sistema: pular a frase problemática em vez de
+// encerrar a leitura. Só desiste quando o motor falha várias vezes em sequência.
+let _falhasSistema = 0;
+const MAX_FALHAS_SISTEMA = 5;
+
 function tocarFraseSistema(){
   const f = estado.frases[estado.fraseIdx];
   if(!f){ pausar(); return; }
@@ -492,6 +503,7 @@ function tocarFraseSistema(){
   marcarFrase();
   pedirWakeLock();
   falaSistema.falar(f.falado, async () => {
+    _falhasSistema = 0; // a frase saiu: o motor está são
     salvarProgressoAgora();
     if(!estado.tocando) return;
     if(estado.fraseIdx + 1 < estado.frases.length){
@@ -502,7 +514,34 @@ function tocarFraseSistema(){
     } else {
       avancarCapituloAuto();
     }
-  }, () => pausar());
+  }, (erro) => {
+    // 'synthesis-failed', 'audio-busy', 'network'… são comuns no Android e
+    // antes paravam o livro de vez. A voz do sistema é o último recurso da
+    // escada: ela precisa insistir, não desistir.
+    if(!estado.tocando) return;
+    // Sem motor nenhum no aparelho não há o que insistir — pular frases só
+    // varreria o capítulo em silêncio.
+    if(!falaSistema.suportada || erro?.message === 'sem-suporte'){
+      _falhasSistema = 0;
+      pausar();
+      return;
+    }
+    _falhasSistema++;
+    if(_falhasSistema >= MAX_FALHAS_SISTEMA){
+      _falhasSistema = 0;
+      pausar();
+      const el = $('estado-audio');
+      if(el) el.textContent = 'A voz do sistema parou de responder. Toque em play para retomar.';
+      return;
+    }
+    // pular a frase problemática e seguir
+    if(estado.fraseIdx + 1 < estado.frases.length){
+      estado.fraseIdx++;
+      setTimeout(() => { if(estado.tocando) tocarFraseSistema(); }, 150);
+    } else {
+      avancarCapituloAuto();
+    }
+  });
 }
 
 /* ---------- controle unificado ---------- */
@@ -516,15 +555,24 @@ let _audioPrimado = false;
    Chamada por tocar() e por avancarCapituloAuto() — não faz prime iOS. */
 async function _iniciarCapitulo(){
   if(!estado.tocando) return;
-  if(await tentarModoAudio()){
-    if(!estado.tocando) return;
+  let temAudio = false;
+  try{
+    temAudio = await tentarModoAudio();
+  }catch(err){
+    // IndexedDB recusando, memória curta, registro antigo sem mapa… nada disso
+    // pode emudecer a leitura: a voz do sistema assume e o livro continua.
+    console.error('[copiloto:audio]', err);
+    estado.modoAudio = false;
+    temAudio = false;
+  }
+  if(!estado.tocando) return;
+  if(temAudio){
     marcarFrase();
     audioEl.play().catch(() => {
       estado.modoAudio = false;
       if(estado.tocando) tocarFraseSistema();
     });
   } else {
-    if(!estado.tocando) return;
     estado.modoAudio = false;
     tocarFraseSistema();
   }
@@ -646,6 +694,7 @@ function mudarCapitulo(dir){
 /* ---------- geração Piper em segundo plano ---------- */
 function agendarGeracao(){
   if(estado.motor !== 'piper' || !piper.disponivel || !estado.vozPiperPronta || !estado.livro) return;
+  gerador.capLendo = estado.capIdx; // referência da limpeza de emergência
   // Gerar capítulo atual + próximos 2 em segundo plano — quando o leitor
   // chegar lá, o áudio já vai estar pronto. Mais que isso estoura a cota
   // do navegador (cada capítulo em WAV pesa dezenas de MB).
@@ -684,20 +733,25 @@ gerador.aoMudar = (ev) => {
 
 async function _trocarParaPiperAgora(){
   if(_trocandoVoz || !estado.tocando) return;
-  // Parar voz do sistema sem mudar estado.tocando
-  falaSistema.parar();
-  // Tentar carregar o áudio Piper na posição da frase atual
-  if(await tentarModoAudio()){
-    if(!estado.tocando) return;
-    marcarFrase();
-    audioEl.play().catch(() => {
-      estado.modoAudio = false;
-      if(estado.tocando) tocarFraseSistema();
-    });
-  } else {
-    // Falhou (raro) — voltar à voz do sistema
-    if(estado.tocando) tocarFraseSistema();
+  // Carregar o áudio ANTES de calar a voz do sistema: se isto falhar, a leitura
+  // não pode ficar em silêncio (antes o parar() vinha primeiro e um erro aqui
+  // deixava o app mudo com o botão marcando "tocando").
+  let pronto = false;
+  try{
+    pronto = await tentarModoAudio();
+  }catch(err){
+    console.error('[copiloto:troca-piper]', err);
+    estado.modoAudio = false;
+    return; // a voz do sistema segue lendo, intacta
   }
+  if(!estado.tocando) return;
+  if(!pronto) return;
+  falaSistema.parar();
+  marcarFrase();
+  audioEl.play().catch(() => {
+    estado.modoAudio = false;
+    if(estado.tocando) tocarFraseSistema();
+  });
 }
 
 async function atualizarEstadoAudioUI(ev){
@@ -775,6 +829,9 @@ async function abrirLivro(id){
   prepararCapitulo();
   atualizarIconePlay();
   mostrarTela('player');
+  // Áudio dos outros livros só ocupa espaço agora — liberar antes de gerar,
+  // senão o armazenamento cresce sem limite de um livro para o outro.
+  gerador.limparOutrosLivros(livro.id).catch(() => {});
   agendarGeracao();
   await bd.salvar('config', {chave: 'ultimoLivro', valor: id});
 }
@@ -878,13 +935,26 @@ async function preencherVozesPiper(){
   // Usar cache da lista se disponível; o worker pode estar ocupado gerando áudio
   let lista = _listaVozesCache;
   if(!lista){
-    try{ lista = await piper.vozes(); _listaVozesCache = lista; }catch{ lista = []; }
+    try{
+      lista = await piper.vozes();
+      // Só guardar em cache a lista completa (da rede). A lista mínima do modo
+      // offline não pode congelar a sessão inteira.
+      if(piper.listaCompleta) _listaVozesCache = lista;
+    }catch{ lista = []; }
   }
-  // Voz salva que saiu da lista (ex.: incompatível com o motor): voltar ao padrão,
-  // senão o usuário fica preso numa voz que nunca vai gerar áudio.
-  if(lista.length && !lista.some(v => v.id === piper.vozId)){
+  // A voz salva sumiu da lista? Só trocar quando temos certeza — ou seja, com a
+  // lista completa, ou quando a voz é sabidamente incompatível. Sem isso, abrir
+  // o app sem internet trocava a voz do usuário e descartava todo o áudio pronto.
+  const voziIncompativel = piper.incompativeis.includes(piper.vozId);
+  const podeTrocar = piper.listaCompleta || voziIncompativel;
+  if(lista.length && podeTrocar && !lista.some(v => v.id === piper.vozId)){
     piper.vozId = lista[0].id;
     bd.salvar('config', {chave: 'vozPiper', valor: piper.vozId});
+  }
+  // A voz atual pode não estar na lista mínima do modo offline; mostrá-la assim
+  // mesmo para o seletor não "pular" para outra voz na frente do usuário.
+  if(lista.length && !lista.some(v => v.id === piper.vozId)){
+    lista = [{id: piper.vozId, nome: piper.vozId}, ...lista];
   }
   // Só consultar armazenadas se o cache local não cobre a voz atual
   if(!_vozesBaixadas.has(piper.vozId)){
@@ -975,8 +1045,30 @@ async function baixarVozPiper(){
   try{
     await piper.baixar(piper.vozId);
     _vozesBaixadas.add(piper.vozId);
-    estado.vozPiperPronta = true;
-    prog.textContent = 'Voz baixada ✓ Agora funciona 100% offline.';
+
+    // Baixar o modelo não basta: a síntese também puxa o runtime ONNX e o
+    // phonemizador dos CDNs, e isso só acontecia na primeira geração de áudio.
+    // Quem baixasse a voz em casa e saísse sem sinal ficava sem voz neural.
+    // Gerar uma frase curta agora aquece esses caches E prova que a voz funciona.
+    prog.textContent = 'Preparando o motor de voz (última etapa)…';
+    try{
+      await piper.gerar('Teste de voz.');
+      estado.vozPiperPronta = true;
+      prog.textContent = 'Voz pronta ✓ Agora funciona offline, sem internet.';
+    }catch(err){
+      if(err?.incompativel){
+        _vozesBaixadas.delete(piper.vozId);
+        estado.vozPiperPronta = false;
+        prog.textContent = 'Esta voz não funciona com o motor do app. Escolha outra na lista.';
+        btn.disabled = false;
+        atualizarEstadoAudioUI();
+        return;
+      }
+      // Falhou o aquecimento (sem rede, CDN fora): a voz está baixada e o app
+      // tenta de novo na primeira geração — só não dá para prometer offline.
+      estado.vozPiperPronta = true;
+      prog.textContent = 'Voz baixada ✓ (o motor termina de se preparar na primeira leitura com internet)';
+    }
     btn.classList.add('oculto');
     $('voz-piper-ok').classList.remove('oculto');
     const opt = $('sel-voz-piper').querySelector(`option[value="${piper.vozId}"]`);
@@ -1020,6 +1112,14 @@ function ligarEventos(){
 
   $('btn-voltar-biblioteca').addEventListener('click', () => {
     pausar();
+    // soltar o WAV do capítulo (dezenas de MB) em vez de deixá-lo residente
+    // enquanto o usuário navega pela estante
+    if(estado.urlAudioAtual){
+      try{ URL.revokeObjectURL(estado.urlAudioAtual); }catch{}
+      estado.urlAudioAtual = null;
+    }
+    estado.modoAudio = false;
+    try{ audioEl.removeAttribute('src'); audioEl.load(); }catch{}
     desenharBiblioteca();
     desenharContinuar();
     mostrarTela('biblioteca');
@@ -1117,8 +1217,11 @@ function ligarRedeDeSeguranca(){
     if(el && estado.tela === 'player'){
       el.textContent = 'Um erro foi contornado — a leitura segue com a voz do sistema.';
     }
-    // se estava tocando pelo Piper e o áudio morreu, cair para a voz do sistema
-    if(estado.tocando && estado.modoAudio && audioEl.paused){
+    // Se o app se diz "tocando" mas nada está soando, religar pela voz do
+    // sistema. Não exigir modoAudio aqui: os caminhos que emudecem a leitura
+    // justamente deixam modoAudio falso, e a rede nunca resgatava ninguém.
+    const mudo = estado.modoAudio ? audioEl.paused : !falaSistema.estaFalando();
+    if(estado.tela === 'player' && estado.tocando && mudo){
       estado.modoAudio = false;
       try{ tocarFraseSistema(); }catch{}
     }

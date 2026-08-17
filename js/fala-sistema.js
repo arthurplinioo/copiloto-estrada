@@ -88,6 +88,12 @@ const falaSistema = {
     this.gen++;
     this._desanexar();
     if(this.suportada) speechSynthesis.cancel();
+  },
+
+  /* Está mesmo soando? Usado pela rede de segurança para detectar silêncio. */
+  estaFalando(){
+    if(!this.suportada) return false;
+    try{ return speechSynthesis.speaking || speechSynthesis.pending; }catch{ return false; }
   }
 };
 

@@ -125,10 +125,15 @@ const piper = {
   aoProgressoDownload: null,
 
   iniciar(){
-    if(typeof Worker === 'undefined') return false;
+    if(typeof Worker === 'undefined'){ this.disponivel = false; return false; }
     try{
       this.worker = new Worker('js/piper-worker.bundle.js');
-    }catch{ return false; }
+    }catch{
+      // sem marcar indisponível aqui, o app seguia pedindo geração para um
+      // worker que não existe e enchia a tela de erro
+      this.disponivel = false;
+      return false;
+    }
     this.worker.onmessage = (e) => {
       const m = e.data;
       if(m.tipo === 'worker-pronto'){ this.pronto = true; return; }
@@ -187,7 +192,14 @@ const piper = {
     });
   },
 
-  async vozes(){ return (await this._chamar({tipo: 'vozes'}, 30000)).lista; },
+  async vozes(){
+    const r = await this._chamar({tipo: 'vozes'}, 30000);
+    this.listaCompleta = !!r.completa;      // false = lista mínima (offline)
+    this.incompativeis = r.incompativeis || [];
+    return r.lista;
+  },
+  listaCompleta: false,
+  incompativeis: [],
   async armazenadas(){ return (await this._chamar({tipo: 'armazenadas'}, 30000)).ids; },
   async baixar(vozId){ await this._chamar({tipo: 'baixar', vozId}, 1200000); },
 
@@ -210,21 +222,30 @@ const piper = {
     this.reiniciar();
   },
 
-  // O worker reaproveita uma única InferenceSession por voz (ver o patch em
-  // src-worker/piper-worker.src.js), então o vazamento do vits-web não existe
-  // mais. Estes dois campos são só uma rede de segurança: se por algum motivo
-  // o patch não pegar, o worker ainda é reciclado antes de a memória apertar.
+  /* Reciclagem do worker — SEMPRE ativa.
+     O patch da sessão ONNX (src-worker/piper-worker.src.js) elimina o maior
+     vazamento, mas o vits-web ainda instancia um módulo do phonemizador
+     (espeak-ng, ~20 MB de WASM+dados) a cada frase e relê o modelo do OPFS,
+     e nada disso é liberado explicitamente. Derrubar o worker de tempos em
+     tempos é a única forma de devolver essa memória ao sistema.
+     Quando o patch está confirmado o acúmulo é bem menor, então espaçamos
+     mais as reciclagens; sem ele, apertamos. */
   FRASES_POR_WORKER: 40,
+  FRASES_POR_WORKER_SEM_PATCH: 8,
   _geradasNesteWorker: 0,
   _patchConfirmado: false,
 
+  _limiteReciclagem(){
+    return this._patchConfirmado ? this.FRASES_POR_WORKER : this.FRASES_POR_WORKER_SEM_PATCH;
+  },
+
   async gerar(texto){
-    // Com o patch ativo não há acúmulo: reciclar só faria a leitura engasgar.
-    if(!this._patchConfirmado && this._geradasNesteWorker >= this.FRASES_POR_WORKER){
-      this.reiniciar();
-      this._geradasNesteWorker = 0;
+    if(this._geradasNesteWorker >= this._limiteReciclagem()){
+      this.reiniciar(); // zera _geradasNesteWorker
     }
     const r = await this._chamar({tipo: 'gerar', texto, vozId: this.vozId}, 300000);
+    // Só confirma quando o worker avisa que a sessão veio mesmo do cache.
+    // A primeira frase de cada worker cria a sessão, então nunca reaproveita.
     if(r.sessaoReaproveitada) this._patchConfirmado = true;
     this._geradasNesteWorker++;
     return r.buf;
@@ -286,6 +307,19 @@ const gerador = {
     }catch{}
   },
 
+  /* Áudio de livros que não estão sendo lidos: dezenas ou centenas de MB que
+     ficavam presos até o livro ser apagado da estante. Some ao abrir outro. */
+  async limparOutrosLivros(livroAtualId){
+    try{
+      for(const loja of ['capAudio', 'wavs']){
+        for(const c of await bd.chaves(loja)){
+          const s = String(c);
+          if(!s.startsWith(`${livroAtualId}:`)) await bd.apagar(loja, c);
+        }
+      }
+    }catch{}
+  },
+
   pedir(livro, capIdx){
     if(capIdx < 0 || capIdx >= livro.capitulos.length) return;
     if(!livro.capitulos[capIdx].incluir) return;
@@ -298,9 +332,23 @@ const gerador = {
     this._rodar();
   },
 
+  // Capítulo em que o leitor está agora — a limpeza de emergência por falta de
+  // espaço precisa preservar a vizinhança DELE, não a do capítulo em geração.
+  capLendo: 0,
+
   async _rodar(){
     if(this.ativo) return;
     this.ativo = true;
+    try{
+      await this._laco();
+    }finally{
+      // sem isto, uma exceção escapando do laço travava a geração para sempre
+      this.atual = null;
+      this.ativo = false;
+    }
+  },
+
+  async _laco(){
     while(this.fila.length){
       const {livro, capIdx} = this.fila.shift();
       const chave = this.chaveCap(livro.id, capIdx);
@@ -310,7 +358,15 @@ const gerador = {
         if(existente){
           const frases = frasesDoCapitulo(livro.capitulos[capIdx]);
           // áudio de outra voz ou com nº de frases diferente: refazer
-          if(existente.nFrases === frases.length && existente.vozId === piper.vozId) continue;
+          if(existente.nFrases === frases.length && existente.vozId === piper.vozId){
+            // Já estava pronto de uma sessão anterior. Avisar mesmo assim: sem
+            // este aviso o app nunca trocava da voz do sistema para a neural
+            // num capítulo cujo áudio já existia no banco.
+            this.falhas.delete(chave);
+            this.aoMudar?.({livroId: livro.id, capIdx, estado: 'pronto',
+                            duracao: existente.duracao, jaExistia: true});
+            continue;
+          }
           await bd.apagar('capAudio', chave);
         }
         await this._gerarCapitulo(livro, capIdx);
@@ -328,9 +384,12 @@ const gerador = {
         }
         const n = (this.falhas.get(chave) || 0) + 1;
         this.falhas.set(chave, n);
-        // Sem espaço: liberar capítulos fora da janela e tentar de novo uma vez
+        // Sem espaço: liberar o que dá e tentar de novo uma vez. A janela é
+        // centrada em ONDE O LEITOR ESTÁ — centrar no capítulo em geração
+        // (que vai até 2 à frente) apagava o áudio do capítulo tocando agora.
         if(/quota|QuotaExceeded|espaço/i.test(msg) && n < this.MAX_TENTATIVAS){
-          await this.limparForaDaJanela(livro.id, capIdx, 0, 1);
+          await this.limparForaDaJanela(livro.id, this.capLendo, 0, 1);
+          await this.limparOutrosLivros(livro.id);
           this.fila.unshift({livro, capIdx});
           continue;
         }

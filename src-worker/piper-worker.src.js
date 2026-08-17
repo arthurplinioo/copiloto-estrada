@@ -27,6 +27,7 @@ const post = (m, t) => self.postMessage(m, t || []);
 let vozCorrente = null;          // voz da chamada em andamento
 let sessaoCache = null;          // {vozId, sessao}
 let patchAplicado = false;
+let reaproveitou = false;        // a ÚLTIMA geração reusou a sessão de fato?
 
 function aplicarPatchSessao(){
   try{
@@ -36,8 +37,10 @@ function aplicarPatchSessao(){
     alvo.create = async (modelo, opcoes) => {
       const vozId = vozCorrente;
       if(sessaoCache && sessaoCache.vozId === vozId && vozId != null){
-        return sessaoCache.sessao; // reaproveita — aqui morria a memória
+        reaproveitou = true;       // reaproveitou DE VERDADE
+        return sessaoCache.sessao; // aqui morria a memória
       }
+      reaproveitou = false;
       if(sessaoCache?.sessao?.release){
         try{ await sessaoCache.sessao.release(); }catch{}
       }
@@ -68,11 +71,13 @@ self.onmessage = async (e) => {
   try {
     if (m.tipo === 'vozes') {
       let lista = [];
+      let completa = false; // veio da rede? offline a lista é só um mínimo
       try {
         const todas = await tts.voices();
         lista = todas
           .filter(v => /^pt_(BR|PT)/.test(v.key || ''))
           .map(v => ({ id: v.key, nome: v.name || v.key, qualidade: v.quality || '' }));
+        completa = lista.length > 0;
       } catch { /* offline: cai nas conhecidas abaixo */ }
       if (!lista.length) {
         lista = [
@@ -81,7 +86,9 @@ self.onmessage = async (e) => {
         ];
       }
       lista = lista.filter(v => !INCOMPATIVEIS.has(v.id));
-      post({ tipo: 'vozes', reqId: m.reqId, lista });
+      // 'completa' evita que o app troque a voz do usuário só porque abriu sem
+      // internet e a lista veio curta — trocar a voz descartava o áudio pronto.
+      post({ tipo: 'vozes', reqId: m.reqId, lista, completa, incompativeis: [...INCOMPATIVEIS] });
 
     } else if (m.tipo === 'armazenadas') {
       const ids = await tts.stored();
@@ -114,9 +121,12 @@ self.onmessage = async (e) => {
       if (!patchAplicado) patchAplicado = aplicarPatchSessao();
       if (vozCorrente !== m.vozId) await liberarSessao();
       vozCorrente = m.vozId;
+      reaproveitou = false;
       const wav = await tts.predict({ text: m.texto, voiceId: m.vozId });
       const buf = await wav.arrayBuffer();
-      post({ tipo: 'wav', reqId: m.reqId, buf, sessaoReaproveitada: patchAplicado }, [buf]);
+      // 'reaproveitou' só é true quando a sessão veio do cache — nunca deduzir
+      // isso de "consegui envolver a função", que é sempre verdade.
+      post({ tipo: 'wav', reqId: m.reqId, buf, sessaoReaproveitada: reaproveitou }, [buf]);
     }
   } catch (err) {
     const msg = String(err?.message || err);
