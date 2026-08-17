@@ -469,6 +469,11 @@ audioEl.addEventListener('error', () => {
 // _pausaProg impede que pausas programáticas (trocarCapitulo, prime iOS) disparem.
 let _pausaProg = false;
 audioEl.addEventListener('pause', () => {
+  // IMPORTANTE: pela especificação HTML, o navegador dispara 'pause' ANTES de
+  // 'ended' quando a mídia chega ao fim. Sem esta guarda, o fim de cada capítulo
+  // zerava estado.tocando e o avanço automático abortava — o usuário precisava
+  // apertar play a cada trecho.
+  if(audioEl.ended) return;
   if(_pausaProg || !estado.modoAudio || !estado.tocando) return;
   estado.tocando = false;
   estado.pausadoEm = Date.now();
@@ -639,20 +644,31 @@ function mudarCapitulo(dir){
 /* ---------- geração Piper em segundo plano ---------- */
 function agendarGeracao(){
   if(estado.motor !== 'piper' || !piper.disponivel || !estado.vozPiperPronta || !estado.livro) return;
-  // Gerar capítulo atual + próximos 3 em segundo plano — quando o leitor
-  // chegar lá, o áudio já vai estar pronto.
+  // Gerar capítulo atual + próximos 2 em segundo plano — quando o leitor
+  // chegar lá, o áudio já vai estar pronto. Mais que isso estoura a cota
+  // do navegador (cada capítulo em WAV pesa dezenas de MB).
   const inc = indicesIncluidos(estado.livro);
   const pos = inc.indexOf(estado.capIdx);
-  for(let d = 0; d <= 3 && pos + d < inc.length; d++){
+  if(pos < 0) return;
+  for(let d = 0; d <= 2 && pos + d < inc.length; d++){
     gerador.pedir(estado.livro, inc[pos + d]);
   }
+  // liberar espaço dos capítulos que já ficaram para trás
+  gerador.limparForaDaJanela(estado.livro.id, estado.capIdx).catch(() => {});
 }
 
 // Guard: impede _trocarParaPiperAgora de disparar durante troca de voz
 let _trocandoVoz = false;
 
+// Erro definitivo por capítulo: mantém a mensagem na tela em vez de deixar
+// "Preparando…" mascarar a falha (era o caso da voz Edresson).
+const _errosCap = new Map();
+
 gerador.aoMudar = (ev) => {
   if(!estado.livro || ev.livroId !== estado.livro.id) return;
+  const chave = gerador.chaveCap(ev.livroId, ev.capIdx);
+  if(ev.estado === 'erro' && ev.definitivo) _errosCap.set(chave, ev.erro || 'falha desconhecida');
+  else if(ev.estado === 'pronto' || ev.estado === 'gerando') _errosCap.delete(chave);
   atualizarEstadoAudioUI(ev);
   // Áudio natural ficou pronto para o capítulo atual enquanto a voz do sistema
   // estava lendo? Trocar imediatamente para o áudio Piper na frase atual.
@@ -695,15 +711,26 @@ async function atualizarEstadoAudioUI(ev){
   if(ev && ev.capIdx === estado.capIdx){
     if(ev.estado === 'gerando'){
       el.textContent = `Convertendo texto em fala: frase ${ev.feito} de ${ev.total}… (a voz já está salva no aparelho)`;
+    } else if(ev.estado === 'baixando-voz'){
+      el.textContent = 'Baixando o modelo desta voz… (uma vez só)';
     } else if(ev.estado === 'pronto'){
       el.textContent = 'Áudio natural pronto ✓';
     } else if(ev.estado === 'erro'){
-      el.textContent = 'Falha ao gerar áudio — usando a voz do sistema. ' + (ev.erro || '');
+      el.textContent = ev.definitivo
+        ? `Esta voz falhou neste trecho — seguindo com a voz do sistema. (${ev.erro || ''})`
+        : 'Tentando de novo gerar o áudio…';
     }
     return;
   }
   if(!estado.livro) return;
-  const reg = await bd.obter('capAudio', gerador.chaveCap(estado.livro.id, estado.capIdx));
+  // erro definitivo tem prioridade: não mascarar com "Preparando…"
+  const chave = gerador.chaveCap(estado.livro.id, estado.capIdx);
+  const erro = _errosCap.get(chave);
+  if(erro){
+    el.textContent = `Esta voz falhou neste trecho — seguindo com a voz do sistema. (${erro})`;
+    return;
+  }
+  const reg = await bd.obter('capAudio', chave);
   el.textContent = reg
     ? 'Áudio natural pronto ✓'
     : 'Preparando áudio deste capítulo… (a voz já está salva no aparelho)';
@@ -1004,7 +1031,30 @@ function ligarEventos(){
 /* =====================================================================
    Inicialização
    ===================================================================== */
+/* Rede de segurança: nenhum erro solto pode derrubar a leitura. Se algo
+   falhar no motor neural, a voz do sistema assume e o livro continua aberto. */
+function ligarRedeDeSeguranca(){
+  const socorro = (origem, err) => {
+    console.error(`[copiloto:${origem}]`, err);
+    const el = $('estado-audio');
+    if(el && estado.tela === 'player'){
+      el.textContent = 'Um erro foi contornado — a leitura segue com a voz do sistema.';
+    }
+    // se estava tocando pelo Piper e o áudio morreu, cair para a voz do sistema
+    if(estado.tocando && estado.modoAudio && audioEl.paused){
+      estado.modoAudio = false;
+      try{ tocarFraseSistema(); }catch{}
+    }
+  };
+  window.addEventListener('error', (e) => { socorro('erro', e.error || e.message); });
+  window.addEventListener('unhandledrejection', (e) => {
+    e.preventDefault(); // impede que a promessa solta derrube a página
+    socorro('promessa', e.reason);
+  });
+}
+
 async function iniciar(){
+  ligarRedeDeSeguranca();
   await bd.abrir();
   if(bd.soMemoria){
     $('aviso-armazenamento').innerHTML =

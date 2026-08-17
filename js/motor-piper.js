@@ -128,6 +128,8 @@ const gerador = {
   ativo: false,
   atual: null,         // {livroId, capIdx}
   aoMudar: null,       // callback de estado p/ UI
+  falhas: new Map(),   // chaveCap -> nº de tentativas que falharam
+  MAX_TENTATIVAS: 2,
 
   chaveCap(livroId, capIdx){ return `${livroId}:${capIdx}`; },
 
@@ -140,12 +142,47 @@ const gerador = {
   cancelarLivro(livroId){
     this.fila = this.fila.filter(f => f.livro.id !== livroId);
     if(this.atual && this.atual.livroId === livroId) this.atual.cancelado = true;
+    for(const k of [...this.falhas.keys()]){
+      if(String(k).startsWith(`${livroId}:`)) this.falhas.delete(k);
+    }
+  },
+
+  /* Um capítulo em WAV ocupa dezenas de MB. Guardamos só uma janela em volta
+     de onde o leitor está; o resto é apagado para não estourar a cota do
+     IndexedDB (era o que derrubava o app depois de alguns trechos). */
+  async limparForaDaJanela(livroId, capIdxAtual, antes = 1, depois = 3){
+    try{
+      const chaves = await bd.chaves('capAudio');
+      const pref = `${livroId}:`;
+      for(const c of chaves){
+        const s = String(c);
+        if(!s.startsWith(pref)) continue;
+        const idx = Number(s.slice(pref.length));
+        if(Number.isNaN(idx)) continue;
+        if(idx < capIdxAtual - antes || idx > capIdxAtual + depois){
+          await bd.apagar('capAudio', c);
+        }
+      }
+      // frases soltas de capítulos já montados também podem ficar para trás
+      const kw = await bd.chaves('wavs');
+      for(const c of kw){
+        const s = String(c);
+        if(!s.startsWith(pref)) continue;
+        const idx = Number(s.slice(pref.length).split(':')[0]);
+        if(Number.isNaN(idx)) continue;
+        if(idx < capIdxAtual - antes || idx > capIdxAtual + depois){
+          await bd.apagar('wavs', c);
+        }
+      }
+    }catch{}
   },
 
   pedir(livro, capIdx){
     if(capIdx < 0 || capIdx >= livro.capitulos.length) return;
     if(!livro.capitulos[capIdx].incluir) return;
     const chave = this.chaveCap(livro.id, capIdx);
+    // capítulo que já falhou demais: não insistir para sempre
+    if((this.falhas.get(chave) || 0) >= this.MAX_TENTATIVAS) return;
     if(this.fila.some(f => this.chaveCap(f.livro.id, f.capIdx) === chave)) return;
     if(this.atual && this.chaveCap(this.atual.livroId, this.atual.capIdx) === chave) return;
     this.fila.push({livro, capIdx});
@@ -157,19 +194,33 @@ const gerador = {
     this.ativo = true;
     while(this.fila.length){
       const {livro, capIdx} = this.fila.shift();
+      const chave = this.chaveCap(livro.id, capIdx);
       this.atual = {livroId: livro.id, capIdx, cancelado: false};
       try{
-        const existente = await bd.obter('capAudio', this.chaveCap(livro.id, capIdx));
+        const existente = await bd.obter('capAudio', chave);
         if(existente){
           const frases = frasesDoCapitulo(livro.capitulos[capIdx]);
-          if(existente.nFrases === frases.length) continue;
-          await bd.apagar('capAudio', this.chaveCap(livro.id, capIdx));
+          // áudio de outra voz ou com nº de frases diferente: refazer
+          if(existente.nFrases === frases.length && existente.vozId === piper.vozId) continue;
+          await bd.apagar('capAudio', chave);
         }
         await this._gerarCapitulo(livro, capIdx);
+        this.falhas.delete(chave);
       }catch(err){
-        if(!this.atual?.cancelado){
-          this.aoMudar?.({livroId: livro.id, capIdx, estado: 'erro', erro: String(err?.message || err)});
+        if(this.atual?.cancelado) continue;
+        const msg = String(err?.message || err);
+        const n = (this.falhas.get(chave) || 0) + 1;
+        this.falhas.set(chave, n);
+        // Sem espaço: liberar capítulos fora da janela e tentar de novo uma vez
+        if(/quota|QuotaExceeded|espaço/i.test(msg) && n < this.MAX_TENTATIVAS){
+          await this.limparForaDaJanela(livro.id, capIdx, 0, 1);
+          this.fila.unshift({livro, capIdx});
+          continue;
         }
+        this.aoMudar?.({
+          livroId: livro.id, capIdx, estado: 'erro', erro: msg,
+          definitivo: n >= this.MAX_TENTATIVAS
+        });
       }
     }
     this.atual = null;
@@ -179,10 +230,23 @@ const gerador = {
   async _gerarCapitulo(livro, capIdx){
     const frases = frasesDoCapitulo(livro.capitulos[capIdx]);
     const prefixo = `${livro.id}:${capIdx}:`;
+    // A voz precisa estar mesmo no aparelho antes de sintetizar. Sem esta
+    // verificação, o vits-web tenta baixar no meio da geração e a primeira
+    // frase estoura o tempo limite (era o caso da voz Edresson).
+    const vozAlvo = piper.vozId;
+    let temVoz = false;
+    try{ temVoz = (await piper.armazenadas()).includes(vozAlvo); }catch{}
+    if(!temVoz){
+      this.aoMudar?.({livroId: livro.id, capIdx, estado: 'baixando-voz', vozId: vozAlvo});
+      await piper.baixar(vozAlvo);
+      if(this.atual?.cancelado) return;
+    }
     // retomar de onde parou: frases já geradas ficam no banco
     const feitas = new Set((await bd.chaves('wavs')).filter(c => String(c).startsWith(prefixo)));
     for(let i = 0; i < frases.length; i++){
       if(this.atual?.cancelado) return;
+      // usuário trocou de voz no meio: abortar esta geração
+      if(piper.vozId !== vozAlvo) return;
       const chave = `${prefixo}${i}`;
       if(feitas.has(chave)) continue;
       const buf = await piper.gerar(frases[i].falado);
@@ -198,7 +262,7 @@ const gerador = {
       bufs.push(reg.buf);
     }
     const {wav, mapa, duracao} = concatenarWavs(bufs);
-    await bd.salvar('capAudio', {chave: this.chaveCap(livro.id, capIdx), wav, mapa, duracao, vozId: piper.vozId, nFrases: frases.length});
+    await bd.salvar('capAudio', {chave: this.chaveCap(livro.id, capIdx), wav, mapa, duracao, vozId: vozAlvo, nFrases: frases.length});
     await bd.apagarPrefixo('wavs', prefixo);
     this.aoMudar?.({livroId: livro.id, capIdx, estado: 'pronto', duracao});
   },
