@@ -47,6 +47,55 @@ function montarWav(fmt, blocos){
 
 /* Concatena WAVs de frases em um capítulo único + mapa de tempos.
    Pausa curta de silêncio entre frases dá respiro natural à leitura. */
+/* Versão de baixo consumo: em vez de segurar todas as frases na memória e
+   depois alocar o capítulo inteiro (pico = 2× o áudio), lê cada frase duas
+   vezes do banco e monta direto no buffer final (pico = 1× + uma frase).
+   Num celular isso é a diferença entre tocar e o navegador matar a aba. */
+async function concatenarWavsDoBanco(n, carregar, pausaMs = 280){
+  const primeiro = await carregar(0);
+  const fmt = lerWav(primeiro).fmt;
+  const bytesPorSeg = fmt.taxa * fmt.canais * fmt.bits / 8;
+  const silBytes = Math.round(bytesPorSeg * pausaMs / 1000) & ~1;
+
+  // 1ª passada: medir e montar o mapa de tempos, sem reter os dados
+  const tamanhos = new Array(n);
+  const mapa = [];
+  let total = 0;
+  for(let i = 0; i < n; i++){
+    const buf = i === 0 ? primeiro : await carregar(i);
+    const len = lerWav(buf).dados.length;
+    tamanhos[i] = len;
+    mapa.push({inicio: total / bytesPorSeg, dur: len / bytesPorSeg});
+    total += len;
+    if(i < n - 1) total += silBytes;
+  }
+
+  // 2ª passada: preencher o buffer final uma frase por vez
+  const saidaBuf = new ArrayBuffer(44 + total);
+  escreverCabecalhoWav(saidaBuf, fmt, total);
+  const saida = new Uint8Array(saidaBuf);
+  let off = 44;
+  for(let i = 0; i < n; i++){
+    const {dados} = lerWav(await carregar(i));
+    saida.set(dados, off);
+    off += tamanhos[i];
+    if(i < n - 1) off += silBytes; // silêncio já é zero
+  }
+  return {wav: saidaBuf, mapa, duracao: total / bytesPorSeg};
+}
+
+function escreverCabecalhoWav(buf, fmt, totalPcm){
+  const dv = new DataView(buf);
+  const escreverStr = (o, s) => { for(let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  const blocoAlinh = fmt.canais * fmt.bits / 8;
+  escreverStr(0, 'RIFF'); dv.setUint32(4, 36 + totalPcm, true); escreverStr(8, 'WAVE');
+  escreverStr(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true);
+  dv.setUint16(22, fmt.canais, true); dv.setUint32(24, fmt.taxa, true);
+  dv.setUint32(28, fmt.taxa * blocoAlinh, true); dv.setUint16(32, blocoAlinh, true);
+  dv.setUint16(34, fmt.bits, true);
+  escreverStr(36, 'data'); dv.setUint32(40, totalPcm, true);
+}
+
 function concatenarWavs(bufs, pausaMs = 280){
   const primeiro = lerWav(bufs[0]);
   const fmt = primeiro.fmt;
@@ -91,13 +140,31 @@ const piper = {
       else p.res(m);
     };
     this.worker.onerror = (e) => {
-      // worker quebrou de vez: rejeitar tudo que esperava resposta
+      // O worker morreu (falta de memória do WASM, modelo corrompido…).
+      // Rejeitar o que estava pendente e levantar um worker novo: sem isto o
+      // motor neural ficava desligado até o app ser reaberto.
       for(const p of this.pendentes.values()) p.rej(new Error('Falha no motor de voz: ' + (e.message || 'erro')));
       this.pendentes.clear();
-      this.disponivel = false;
+      this.pronto = false;
+      this.aoQuebrar?.(e.message || 'erro');
+      this.reiniciar();
     };
     this.disponivel = true;
     return true;
+  },
+
+  aoQuebrar: null,
+
+  /* Derruba o worker e levanta outro. Trocar de voz sem isto deixava o modelo
+     ONNX anterior na memória; carregar o segundo estourava a memória do
+     celular e o navegador matava a aba. */
+  reiniciar(){
+    try{ this.worker?.terminate(); }catch{}
+    this.worker = null;
+    this.pronto = false;
+    for(const p of this.pendentes.values()) p.rej(new Error('Motor de voz reiniciado.'));
+    this.pendentes.clear();
+    return this.iniciar();
   },
 
   _chamar(msg, timeoutMs = 300000){
@@ -254,14 +321,12 @@ const gerador = {
       await bd.salvar('wavs', {chave, buf});
       this.aoMudar?.({livroId: livro.id, capIdx, estado: 'gerando', feito: i + 1, total: frases.length});
     }
-    // montar capítulo único
-    const bufs = [];
-    for(let i = 0; i < frases.length; i++){
+    // montar capítulo único lendo do banco uma frase por vez (memória baixa)
+    const {wav, mapa, duracao} = await concatenarWavsDoBanco(frases.length, async (i) => {
       const reg = await bd.obter('wavs', `${prefixo}${i}`);
       if(!reg) throw new Error('Frase gerada sumiu do banco.');
-      bufs.push(reg.buf);
-    }
-    const {wav, mapa, duracao} = concatenarWavs(bufs);
+      return reg.buf;
+    });
     await bd.salvar('capAudio', {chave: this.chaveCap(livro.id, capIdx), wav, mapa, duracao, vozId: vozAlvo, nFrases: frases.length});
     await bd.apagarPrefixo('wavs', prefixo);
     this.aoMudar?.({livroId: livro.id, capIdx, estado: 'pronto', duracao});
@@ -273,4 +338,4 @@ const gerador = {
   }
 };
 
-Object.assign(window, {piper, gerador, concatenarWavs, lerWav, montarWav});
+Object.assign(window, {piper, gerador, concatenarWavs, concatenarWavsDoBanco, lerWav, montarWav});

@@ -86,6 +86,22 @@ console.log('== rede de segurança contra crash ==');
     !d.getElementById('tela-player').classList.contains('oculto'));
 }
 
+console.log('== motor neural: reinício e limpeza de voz ==');
+{
+  verificar('piper sabe reiniciar o worker', typeof ev('piper.reiniciar') === 'function');
+  verificar('piper avisa quando quebra', ev('typeof piper.aoQuebrar') !== 'undefined');
+  // reiniciar deve rejeitar o que estava pendente, não deixar promessa pendurada
+  const sobrou = ev(`(() => {
+    piper.pendentes.set(999, {res(){}, rej(){}});
+    try{ piper.reiniciar(); }catch{}
+    return piper.pendentes.size;
+  })()`);
+  verificar('reinício limpa requisições pendentes', sobrou === 0, `(sobrou ${sobrou})`);
+  verificar('botão de apagar voz existe', !!d.getElementById('btn-apagar-voz'));
+  verificar('app expõe uso de armazenamento',
+    typeof ev('mostrarUsoArmazenamento') === 'function');
+}
+
 console.log('== janela de limpeza de áudio ==');
 {
   const temLimpeza = typeof ev('gerador.limparForaDaJanela') === 'function';

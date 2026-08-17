@@ -893,7 +893,57 @@ async function preencherVozesPiper(){
   btn.classList.toggle('oculto', estado.vozPiperPronta);
   btn.disabled = false;
   $('voz-piper-ok').classList.toggle('oculto', !estado.vozPiperPronta);
+  const btnApagar = $('btn-apagar-voz');
+  if(btnApagar){
+    btnApagar.classList.toggle('oculto', !estado.vozPiperPronta);
+    btnApagar.disabled = false;
+  }
   atualizarEstadoAudioUI();
+  mostrarUsoArmazenamento();
+}
+
+/* Quanto o app está ocupando no aparelho — vozes + áudio gerado + livros. */
+async function mostrarUsoArmazenamento(){
+  const el = $('uso-armazenamento');
+  if(!el) return;
+  try{
+    const est = await navigator.storage?.estimate?.();
+    if(!est?.usage){ el.textContent = ''; return; }
+    const mb = (n) => `${Math.round(n / 1048576)} MB`;
+    el.textContent = est.quota
+      ? `Espaço usado pelo app: ${mb(est.usage)} de ${mb(est.quota)} disponíveis.`
+      : `Espaço usado pelo app: ${mb(est.usage)}.`;
+  }catch{ el.textContent = ''; }
+}
+
+/* Apaga o modelo da voz do aparelho (libera dezenas de MB) e o áudio que
+   dependia dela. Útil quando um download saiu corrompido. */
+async function apagarVozPiper(){
+  const btn = $('btn-apagar-voz');
+  const prog = $('prog-download-voz');
+  if(!confirm('Apagar esta voz do aparelho? O áudio já gerado com ela também sai. Você pode baixar de novo depois.')) return;
+  btn.disabled = true;
+  prog.classList.remove('oculto');
+  prog.textContent = 'Apagando voz…';
+  const estavaTocando = estado.tocando;
+  if(estavaTocando) pausar();
+  try{
+    if(estado.livro){
+      gerador.cancelarLivro(estado.livro.id);
+      try{ await gerador.apagarAudioLivro(estado.livro.id); }catch{}
+    }
+    await piper.remover(piper.vozId);
+    _vozesBaixadas.delete(piper.vozId);
+    estado.vozPiperPronta = false;
+    // worker novo: devolve ao sistema a memória do modelo que estava carregado
+    piper.reiniciar();
+    prog.textContent = 'Voz apagada. Baixe de novo quando quiser.';
+    await preencherVozesPiper();
+  }catch(err){
+    prog.textContent = 'Não consegui apagar: ' + (err?.message || err);
+    btn.disabled = false;
+  }
+  if(estavaTocando) tocar();
 }
 
 async function baixarVozPiper(){
@@ -914,6 +964,9 @@ async function baixarVozPiper(){
     const opt = $('sel-voz-piper').querySelector(`option[value="${piper.vozId}"]`);
     if(opt && !opt.textContent.includes('✓')) opt.textContent += ' ✓ baixada';
     atualizarEstadoAudioUI();
+    mostrarUsoArmazenamento();
+    const btnApagar = $('btn-apagar-voz');
+    if(btnApagar) btnApagar.classList.remove('oculto');
     agendarGeracao();
   }catch(err){
     prog.textContent = 'Falha no download: ' + (err?.message || err) + ' — verifique a conexão e tente de novo.';
@@ -978,6 +1031,7 @@ function ligarEventos(){
     const estavaTocando = estado.tocando;
     try{
       if(estavaTocando) pausar();
+      const vozAnterior = piper.vozId;
       piper.vozId = e.target.value;
       bd.salvar('config', {chave: 'vozPiper', valor: piper.vozId});
       estado.vozPiperPronta = _vozesBaixadas.has(piper.vozId);
@@ -986,6 +1040,10 @@ function ligarEventos(){
         gerador.cancelarLivro(estado.livro.id);
         try{ await gerador.apagarAudioLivro(estado.livro.id); }catch{}
       }
+      // Levantar um worker novo: o modelo ONNX da voz anterior fica na memória
+      // do worker, e carregar o segundo em cima estourava a memória do celular
+      // (a aba morria). Reiniciar devolve a memória ao sistema.
+      if(vozAnterior !== piper.vozId) piper.reiniciar();
       await preencherVozesPiper();
       agendarGeracao();
       if(estavaTocando) tocar();
@@ -998,6 +1056,7 @@ function ligarEventos(){
     }
   });
   $('btn-baixar-voz').addEventListener('click', baixarVozPiper);
+  $('btn-apagar-voz')?.addEventListener('click', apagarVozPiper);
   $('sel-voz-sistema').addEventListener('change', (e) => {
     falaSistema.vozAtual = falaSistema.vozes[Number(e.target.value)] || null;
     falaSistema.vozDesejadaURI = falaSistema.vozAtual?.voiceURI || '';
@@ -1062,6 +1121,17 @@ async function iniciar(){
   }
 
   piper.iniciar();
+  // Se o motor neural quebrar (memória, modelo corrompido), avisar e seguir
+  // lendo com a voz do sistema em vez de emudecer.
+  piper.aoQuebrar = (msg) => {
+    console.error('[copiloto:worker]', msg);
+    const el = $('estado-audio');
+    if(el) el.textContent = 'O motor neural reiniciou — seguindo com a voz do sistema por ora.';
+    if(estado.tocando && estado.modoAudio && audioEl.paused){
+      estado.modoAudio = false;
+      try{ tocarFraseSistema(); }catch{}
+    }
+  };
 
   estado.livros = await bd.todos('livros');
   for(const p of await bd.todos('progresso')) estado.progresso.set(p.livroId, p);

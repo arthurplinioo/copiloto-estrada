@@ -68,6 +68,23 @@ console.log('== WAV (concatenação de capítulo) ==');
   verificar('duração total ≈ 1,0 s', Math.abs(duracao - 1.0) < 0.03, `(${duracao})`);
   const relido = w.lerWav(w.concatenarWavs([a, b]).wav);
   verificar('WAV concatenado é válido', relido.fmt.taxa === 22050 && relido.dados.length > 0);
+
+  // A versão de memória baixa (usada no celular) precisa dar o MESMO resultado
+  const bufs = [a, b];
+  const eco = await w.concatenarWavsDoBanco(2, async (i) => bufs[i], 200);
+  verificar('versão econômica: mesmo mapa',
+    eco.mapa.length === 2 && Math.abs(eco.mapa[1].inicio - mapa[1].inicio) < 1e-9,
+    `(${eco.mapa[1]?.inicio} vs ${mapa[1].inicio})`);
+  verificar('versão econômica: mesma duração', Math.abs(eco.duracao - duracao) < 1e-9,
+    `(${eco.duracao} vs ${duracao})`);
+  const wCheio = new Uint8Array(w.concatenarWavs([a, b], 200).wav);
+  const wEco = new Uint8Array(eco.wav);
+  verificar('versão econômica: bytes idênticos',
+    wCheio.length === wEco.length && wCheio.every((v, i) => v === wEco[i]),
+    `(${wCheio.length} vs ${wEco.length})`);
+  const relidoEco = w.lerWav(eco.wav);
+  verificar('versão econômica: WAV válido',
+    relidoEco.fmt.taxa === 22050 && relidoEco.dados.length > 0);
 }
 
 console.log(falhas.length ? `\n${falhas.length} FALHA(S)` : '\nREGRAS OK');
