@@ -1,8 +1,20 @@
 // Worker do motor Piper (vits-web): toda a síntese neural roda aqui,
 // fora da thread principal. Protocolo de mensagens em português.
+//
+// ATENÇÃO — limitação conhecida do vits-web (versão 1.0.3): predict() cria uma
+// InferenceSession nova a cada frase e nunca a libera (não há release/dispose
+// na biblioteca). Cada sessão segura o modelo (~60 MB) na memória do WASM, então
+// depois de algumas dezenas de frases o navegador mata a aba. A thread principal
+// contorna isso reciclando este worker de tempos em tempos (ver piper.gerar).
 import * as tts from '@diffusionstudio/vits-web';
 
 const post = (m, t) => self.postMessage(m, t || []);
+
+// Vozes pt-BR que o vits-web não consegue sintetizar: o phonemizador usa a
+// tabela de fonemas padrão do Piper e ignora o phoneme_id_map do modelo, então
+// modelos com tabela menor estouram no nó Gather do encoder
+// ("indices element out of data bounds"). Não adianta rebaixar o modelo.
+const INCOMPATIVEIS = new Set(['pt_BR-edresson-low']);
 
 self.onmessage = async (e) => {
   const m = e.data;
@@ -12,15 +24,16 @@ self.onmessage = async (e) => {
       try {
         const todas = await tts.voices();
         lista = todas
-          .filter(v => (v.key || '').startsWith('pt_BR'))
+          .filter(v => /^pt_(BR|PT)/.test(v.key || ''))
           .map(v => ({ id: v.key, nome: v.name || v.key, qualidade: v.quality || '' }));
       } catch { /* offline: cai nas conhecidas abaixo */ }
       if (!lista.length) {
         lista = [
-          { id: 'pt_BR-faber-medium', nome: 'Faber (masculina, natural)', qualidade: 'medium' },
-          { id: 'pt_BR-edresson-low', nome: 'Edresson (masculina, leve)', qualidade: 'low' },
+          { id: 'pt_BR-faber-medium', nome: 'Faber (masculina)', qualidade: 'medium' },
+          { id: 'pt_PT-tugão-medium', nome: 'Tugão (masculina, sotaque de Portugal)', qualidade: 'medium' },
         ];
       }
+      lista = lista.filter(v => !INCOMPATIVEIS.has(v.id));
       post({ tipo: 'vozes', reqId: m.reqId, lista });
 
     } else if (m.tipo === 'armazenadas') {
@@ -35,15 +48,33 @@ self.onmessage = async (e) => {
 
     } else if (m.tipo === 'remover') {
       await tts.remove(m.vozId);
-      post({ tipo: 'removida', reqId: m.reqId, vozId: m.vozId });
+      // Conferir de verdade: se o arquivo continuar lá, o botão "apagar voz"
+      // mentia para o usuário. Acontecia quando o modelo ainda estava carregado.
+      const restou = (await tts.stored()).includes(m.vozId);
+      post({ tipo: 'removida', reqId: m.reqId, vozId: m.vozId, restou });
+
+    } else if (m.tipo === 'limpar-tudo') {
+      await tts.flush(); // apaga a pasta inteira de modelos
+      post({ tipo: 'limpo', reqId: m.reqId });
 
     } else if (m.tipo === 'gerar') {
+      if (INCOMPATIVEIS.has(m.vozId)) {
+        throw new Error(`A voz ${m.vozId} não funciona neste motor (tabela de fonemas incompatível).`);
+      }
       const wav = await tts.predict({ text: m.texto, voiceId: m.vozId });
       const buf = await wav.arrayBuffer();
       post({ tipo: 'wav', reqId: m.reqId, buf }, [buf]);
     }
   } catch (err) {
-    post({ tipo: 'erro', reqId: m.reqId, msg: String(err?.message || err) });
+    const msg = String(err?.message || err);
+    // O erro do ONNX é ilegível para quem só quer ouvir um livro; traduzir.
+    const incompativel = /out of data bounds|enc_p\/emb\/Gather/i.test(msg);
+    post({
+      tipo: 'erro', reqId: m.reqId, incompativel,
+      msg: incompativel
+        ? 'Esta voz não é compatível com o motor neural deste app.'
+        : msg
+    });
   }
 };
 

@@ -102,6 +102,44 @@ console.log('== motor neural: reinício e limpeza de voz ==');
     typeof ev('mostrarUsoArmazenamento') === 'function');
 }
 
+console.log('== contenção do vazamento de memória do vits-web ==');
+{
+  // predict() do vits-web cria uma InferenceSession por frase e nunca libera.
+  // Reciclar o worker a cada N frases é o que impede a aba de morrer.
+  const n = ev('piper.FRASES_POR_WORKER');
+  verificar('worker é reciclado a cada N frases', n > 0 && n <= 50, `(N=${n})`);
+  verificar('contador de frases começa zerado', ev('piper._geradasNesteWorker') === 0);
+  // gerar() deve reciclar ao bater o limite
+  const reciclou = ev(`(() => {
+    let vezes = 0;
+    const orig = piper.reiniciar;
+    piper.reiniciar = function(){ vezes++; return true; };
+    piper._geradasNesteWorker = piper.FRASES_POR_WORKER;
+    piper._chamar = () => Promise.resolve({buf: new ArrayBuffer(8)});
+    piper.gerar('oi');
+    piper.reiniciar = orig;
+    return vezes;
+  })()`);
+  verificar('gerar() recicla o worker ao bater o limite', reciclou === 1, `(vezes=${reciclou})`);
+}
+
+console.log('== voz incompatível não trava a leitura ==');
+{
+  const marcou = ev(`(() => {
+    const err = new Error('Esta voz não é compatível...');
+    err.incompativel = true;
+    return err.incompativel === true;
+  })()`);
+  verificar('erro carrega a marca de incompatível', marcou);
+  // a UI precisa explicar em vez de mostrar o erro cru do ONNX
+  ev(`estado.motor = 'piper'; piper.disponivel = true; estado.vozPiperPronta = true;
+      atualizarEstadoAudioUI({capIdx: estado.capIdx, estado: 'erro',
+       definitivo: true, incompativel: true, erro: 'enc_p/emb/Gather'})`);
+  const txt = d.getElementById('estado-audio').textContent;
+  verificar('mensagem é legível para o usuário',
+    txt.includes('não funciona') && !txt.includes('Gather'), `("${txt}")`);
+}
+
 console.log('== janela de limpeza de áudio ==');
 {
   const temLimpeza = typeof ev('gerador.limparForaDaJanela') === 'function';

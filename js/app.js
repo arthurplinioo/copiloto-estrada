@@ -716,9 +716,13 @@ async function atualizarEstadoAudioUI(ev){
     } else if(ev.estado === 'pronto'){
       el.textContent = 'Áudio natural pronto ✓';
     } else if(ev.estado === 'erro'){
-      el.textContent = ev.definitivo
-        ? `Esta voz falhou neste trecho — seguindo com a voz do sistema. (${ev.erro || ''})`
-        : 'Tentando de novo gerar o áudio…';
+      if(ev.incompativel){
+        el.textContent = 'Esta voz não funciona com o motor neural do app. Escolha outra voz no painel ⚙️ — a leitura segue com a voz do sistema.';
+      } else {
+        el.textContent = ev.definitivo
+          ? `Esta voz falhou neste trecho — seguindo com a voz do sistema. (${ev.erro || ''})`
+          : 'Tentando de novo gerar o áudio…';
+      }
     }
     return;
   }
@@ -874,6 +878,12 @@ async function preencherVozesPiper(){
   if(!lista){
     try{ lista = await piper.vozes(); _listaVozesCache = lista; }catch{ lista = []; }
   }
+  // Voz salva que saiu da lista (ex.: incompatível com o motor): voltar ao padrão,
+  // senão o usuário fica preso numa voz que nunca vai gerar áudio.
+  if(lista.length && !lista.some(v => v.id === piper.vozId)){
+    piper.vozId = lista[0].id;
+    bd.salvar('config', {chave: 'vozPiper', valor: piper.vozId});
+  }
   // Só consultar armazenadas se o cache local não cobre a voz atual
   if(!_vozesBaixadas.has(piper.vozId)){
     try{
@@ -932,12 +942,18 @@ async function apagarVozPiper(){
       gerador.cancelarLivro(estado.livro.id);
       try{ await gerador.apagarAudioLivro(estado.livro.id); }catch{}
     }
-    await piper.remover(piper.vozId);
-    _vozesBaixadas.delete(piper.vozId);
+    const vozApagada = piper.vozId;
+    await piper.remover(vozApagada); // já reinicia o worker por dentro
+    _vozesBaixadas.delete(vozApagada);
     estado.vozPiperPronta = false;
-    // worker novo: devolve ao sistema a memória do modelo que estava carregado
-    piper.reiniciar();
-    prog.textContent = 'Voz apagada. Baixe de novo quando quiser.';
+    // Conferir no OPFS em vez de confiar no cache — antes a UI dizia "apagada"
+    // e no recarregar a voz reaparecia.
+    let saiu = true;
+    try{ saiu = !(await piper.armazenadas()).includes(vozApagada); }catch{}
+    _vozesBaixadas.clear();
+    prog.textContent = saiu
+      ? 'Voz apagada do aparelho. Baixe de novo quando quiser.'
+      : 'A voz não saiu do armazenamento — tente fechar e reabrir o app.';
     await preencherVozesPiper();
   }catch(err){
     prog.textContent = 'Não consegui apagar: ' + (err?.message || err);

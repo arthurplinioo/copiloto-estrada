@@ -136,7 +136,11 @@ const piper = {
       const p = m.reqId != null ? this.pendentes.get(m.reqId) : null;
       if(!p) return;
       this.pendentes.delete(m.reqId);
-      if(m.tipo === 'erro') p.rej(new Error(m.msg));
+      if(m.tipo === 'erro'){
+        const e = new Error(m.msg);
+        e.incompativel = !!m.incompativel; // voz que este motor não sintetiza
+        p.rej(e);
+      }
       else p.res(m);
     };
     this.worker.onerror = (e) => {
@@ -185,8 +189,41 @@ const piper = {
   async vozes(){ return (await this._chamar({tipo: 'vozes'}, 30000)).lista; },
   async armazenadas(){ return (await this._chamar({tipo: 'armazenadas'}, 30000)).ids; },
   async baixar(vozId){ await this._chamar({tipo: 'baixar', vozId}, 1200000); },
-  async remover(vozId){ await this._chamar({tipo: 'remover', vozId}, 60000); },
-  async gerar(texto){ return (await this._chamar({tipo: 'gerar', texto, vozId: this.vozId}, 300000)).buf; }
+
+  async remover(vozId){
+    // O modelo carregado segura o arquivo no OPFS: derrubar o worker antes,
+    // senão a remoção "funciona" mas o arquivo continua lá.
+    this.reiniciar();
+    const r = await this._chamar({tipo: 'remover', vozId}, 60000);
+    if(r.restou){
+      // Não saiu nem assim: apagar a pasta inteira de modelos.
+      this.reiniciar();
+      await this._chamar({tipo: 'limpar-tudo'}, 60000);
+    }
+    this.reiniciar(); // devolver a memória do modelo ao sistema
+  },
+
+  async limparTudo(){
+    this.reiniciar();
+    await this._chamar({tipo: 'limpar-tudo'}, 60000);
+    this.reiniciar();
+  },
+
+  // O vits-web cria uma InferenceSession por frase e nunca a libera. Reciclar
+  // o worker a cada N frases devolve essa memória ao sistema — sem isto a aba
+  // morria depois de algumas dezenas de frases (com qualquer voz).
+  FRASES_POR_WORKER: 24,
+  _geradasNesteWorker: 0,
+
+  async gerar(texto){
+    if(this._geradasNesteWorker >= this.FRASES_POR_WORKER){
+      this.reiniciar();
+      this._geradasNesteWorker = 0;
+    }
+    const r = await this._chamar({tipo: 'gerar', texto, vozId: this.vozId}, 300000);
+    this._geradasNesteWorker++;
+    return r.buf;
+  }
 };
 
 /* ---------- gerador de capítulos (fila resumível) ---------- */
@@ -276,6 +313,14 @@ const gerador = {
       }catch(err){
         if(this.atual?.cancelado) continue;
         const msg = String(err?.message || err);
+        // Voz incompatível: não adianta repetir em nenhum capítulo deste livro
+        if(err?.incompativel){
+          this.falhas.set(chave, this.MAX_TENTATIVAS);
+          this.fila = this.fila.filter(f => f.livro.id !== livro.id);
+          this.aoMudar?.({livroId: livro.id, capIdx, estado: 'erro', erro: msg,
+                          definitivo: true, incompativel: true});
+          continue;
+        }
         const n = (this.falhas.get(chave) || 0) + 1;
         this.falhas.set(chave, n);
         // Sem espaço: liberar capítulos fora da janela e tentar de novo uma vez
