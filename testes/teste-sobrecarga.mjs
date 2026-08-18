@@ -453,10 +453,13 @@ console.log('== salto por tempo ==');
       duracao: n*10, vozId: piper.vozId, nFrases: n});
     estado.tocando = true;
     await _iniciarCapitulo();
-    // linha do tempo controlada pelo teste
+    // linha do tempo controlada pelo teste. readyState: o jsdom não carrega
+    // mídia de verdade, e o app (com razão) só mexe no tempo com metadados
+    // prontos — sem isto, saltar reiniciaria o capítulo e gravaria progresso.
     let t = 40;
     Object.defineProperty(audioEl, 'currentTime', {configurable:true, get:()=>t, set:(v)=>{t=v;}});
     Object.defineProperty(audioEl, 'duration', {configurable:true, get:()=>n*10});
+    Object.defineProperty(audioEl, 'readyState', {configurable:true, get:()=>1});
     const depoisVoltar = (saltarSegundos(-15), t);
     const depoisAvancar = (saltarSegundos(30), t);
     return {modoAudio: estado.modoAudio, depoisVoltar, depoisAvancar, capIdx: estado.capIdx};
@@ -574,6 +577,83 @@ console.log('== preparar livro inteiro ==');
   const est = ev(`gerador.estimarBytesLivro(estado.livro)`);
   verificar('estimativa de tamanho é plausível', est > 1048576 && est < 5e9,
     `(${Math.round(est/1048576)} MB)`);
+}
+
+// ---------- achados da 3ª revisão sênior ----------
+console.log('== preparo parcial não pode desligar a proteção de espaço ==');
+{
+  // Marcar um livro como "preparado" desliga a poda por janela. Se um preparo
+  // que parou por falta de espaço marcasse o livro, o freio de armazenamento
+  // sumiria justamente num aparelho já sem espaço — o bug histórico voltaria.
+  const r = await ev(`(async () => {
+    let n = 0;
+    gerador._gerarCapitulo = async (livro, capIdx) => {
+      if(++n > 3) { const e = new Error('QuotaExceededError'); throw e; }
+      await bd.salvar('capAudio', {chave: gerador.chaveCap(livro.id, capIdx),
+        wav: new ArrayBuffer(64), mapa:[{inicio:0,dur:1}], duracao:1,
+        vozId: piper.vozId, nFrases: frasesDoCapitulo(livro.capitulos[capIdx]).length,
+        semCitacoes: gerador._semCitacoesAgora()});
+    };
+    gerador.prontos.clear(); gerador.falhas.clear();
+    gerador.livrosPreparados.delete('sobrecarga');
+    await bd.apagarPrefixo('capAudio', 'sobrecarga:');
+    const res = await gerador.prepararLivroInteiro(estado.livro, 0);
+    // o app só marca quando o status é 'completo'
+    await gerador.marcarPreparado(estado.livro.id, res.status === 'completo');
+    return {status: res.status, feitos: res.feitos,
+            marcado: gerador.livrosPreparados.has('sobrecarga')};
+  })()`);
+  verificar('preparo interrompido não reporta "completo"', r.status !== 'completo',
+    `(status=${r.status}, feitos=${r.feitos})`);
+  verificar('preparo parcial NÃO marca o livro como preparado', r.marcado === false);
+
+  // com o livro desmarcado, a poda por janela volta a funcionar
+  const podou = await ev(`(async () => {
+    const antes = (await bd.chaves('capAudio')).filter(c=>String(c).startsWith('sobrecarga:')).length;
+    await gerador.limparForaDaJanela('sobrecarga', 0);
+    const depois = (await bd.chaves('capAudio')).filter(c=>String(c).startsWith('sobrecarga:')).length;
+    return {antes, depois};
+  })()`);
+  verificar('poda por janela volta a agir no livro não preparado',
+    podou.depois <= podou.antes, `(${podou.antes} → ${podou.depois})`);
+}
+
+console.log('== cancelar no meio do preparo ==');
+{
+  const r = await ev(`(async () => {
+    gerador._gerarCapitulo = async () => { await new Promise(r => setTimeout(r, 60)); };
+    gerador.prontos.clear(); gerador.falhas.clear();
+    gerador.livrosPreparados.delete('sobrecarga');
+    const p = gerador.prepararLivroInteiro(estado.livro, 0);
+    await new Promise(r => setTimeout(r, 100));
+    // trocar de voz / apagar livro chamam cancelarLivro por baixo
+    gerador.cancelarLivro('sobrecarga');
+    const res = await p;
+    return {status: res.status, feitos: res.feitos, ativo: gerador.ativo,
+            preparando: gerador.preparandoTudo};
+  })()`);
+  verificar('cancelarLivro interrompe o preparo', r.status === 'cancelado',
+    `(status=${r.status}, feitos=${r.feitos})`);
+  verificar('preparo cancelado não diz "completo"', r.status !== 'completo');
+  verificar('lock do gerador é devolvido', r.ativo === false && r.preparando === false);
+}
+
+console.log('== preferência de citações invalida o áudio de TODOS os livros ==');
+{
+  const r = await ev(`(() => {
+    const reg = {nFrases: 10, vozId: piper.vozId, semCitacoes: true};
+    window.PULAR_CITACOES = true;
+    const serveIgual = gerador.audioServe(reg, 10);
+    window.PULAR_CITACOES = false;      // usuário desligou a opção
+    const serveDiferente = gerador.audioServe(reg, 10);
+    window.PULAR_CITACOES = true;
+    // registro antigo, sem o campo, conta como padrão (com limpeza)
+    const antigo = gerador.audioServe({nFrases:10, vozId:piper.vozId}, 10);
+    return {serveIgual, serveDiferente, antigo};
+  })()`);
+  verificar('áudio gerado com a mesma preferência serve', r.serveIgual === true);
+  verificar('áudio de outra preferência é descartado', r.serveDiferente === false);
+  verificar('registro antigo sem o campo continua válido', r.antigo === true);
 }
 
 console.log(falhas.length ? `\n${falhas.length} FALHA(S)` : '\nSOBRECARGA OK');

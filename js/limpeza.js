@@ -25,16 +25,29 @@ function tituloFalado(titulo){
    45 fecha parênteses..."). Some da voz; a tela continua mostrando tudo.
    ===================================================================== */
 
-// (SILVA, 2020) · (Silva & Souza, 2020, p. 45) · (cf. SILVA, 2020; SOUZA, 2019)
-// Exige NOME + ano dentro do parêntese. Só o ano não basta: "(1920)" costuma ser
-// data de nascimento e precisa continuar sendo lido.
-const RE_CITACAO_PAREN = /\s*\((?=[^()]*\b(?:1[0-9]|20)\d{2}[a-z]?\b)(?=[^()]*\p{L}{2})[^()]{0,160}\)/gu;
+// Uma citação tem FORMA: sobrenome(s) seguidos de ano — "(SILVA, 2020)",
+// "(Silva & Souza, 2020, p. 45)", "(cf. SILVA, 2020; SOUZA, 2019)".
+// Casar a FORMA, e não "tem um ano aí dentro", é o que evita engolir prosa
+// legítima: "(que fora construída em 1890 pelo avô)" tem ano e nome próprio,
+// mas não é citação — e precisa continuar sendo lida.
+const _NOME = String.raw`\p{Lu}[\p{L}.'’-]+`;
+const _LIGA = String.raw`(?:\s*(?:&|e|and)\s*|\s*,\s*|\s+)`;
+const _AUTORES = String.raw`${_NOME}(?:${_LIGA}${_NOME}){0,3}(?:\s+et\s+al\.?)?`;
+const _ANO = String.raw`(?:1[0-9]|20)\d{2}[a-z]?`;
+const _PAG = String.raw`(?:\s*,\s*(?:pp?\.?|p[áa]g(?:ina)?s?\.?|cap\.?|§)\s*[\d\s,.–—-]+)?`;
+const _UMA_CIT = String.raw`${_AUTORES}\s*,?\s*\(?\s*${_ANO}\s*\)?${_PAG}`;
+const RE_CITACAO_PAREN = new RegExp(
+  String.raw`\s*\(\s*(?:(?:cf|conf|ver|veja|see|apud|in)\.?\s+)?${_UMA_CIT}(?:\s*[;,]\s*${_UMA_CIT})*\s*\)`,
+  'gu'
+);
 // [12] · [1,2] · [12-15] · [1; 4] — chamadas numéricas de referência
 const RE_CITACAO_COLCH = /\s*\[\s*\d{1,4}(?:\s*[–—,;-]\s*\d{1,4})*\s*\]/g;
 // (Fig. 3) · (Tabela 2) · (Quadro 1.4) — só entre parênteses; "Figura 3" solta fica
 const RE_CHAMADA_FIG = /\s*\((?:v\.?\s*)?(?:fig(?:ura)?|tab(?:ela)?|quadro|gr[áa]fico|graf|anexo|ap[êe]ndice)\.?\s*\d+[.\d]*\s*\)/gi;
-// marcador de nota colado na palavra: "resultado¹²" ou "resultado*"
-const RE_NOTA_SOBRE = /(\p{L})[¹²³⁰-₟]+/gu;
+// Marcador de nota colado na palavra: "resultado¹²".
+// Só EXPOENTES — subscritos nunca, senão "H₂O" viraria "HO". E só depois de
+// palavra com 3+ letras, para "m²", "x²", "km²" continuarem inteiros.
+const RE_NOTA_SOBRE = /(\p{L}{3,})[¹²³⁰⁴-⁹]+(?=[\s.,;:!?)\]]|$)/gu;
 // ibid., op. cit., et al. — abreviações que a voz lê letra a letra
 const RE_ABREV_REF = /\s*\b(?:ibid|op\.?\s*cit|loc\.?\s*cit|apud|et\s+al)\.?(?=[\s,;.)]|$)/gi;
 
@@ -48,7 +61,10 @@ function limparFalaCitacoes(texto){
   // costurar o que sobrou solto: " ." → "." ; ",," → "," ; "( )" → ""
   t = t.replace(/\s+([.,;:!?…])/g, '$1')
        .replace(/\(\s*\)|\[\s*\]/g, '')
-       .replace(/([.,;:])\s*(?:[.,;:]\s*)+/g, '$1 ')  // ",," e ",." viram um só
+       // ",," e ",." viram um só. Reticências ("...") ficam intactas: achatá-las
+       // em ponto simples mudaria a prosódia da frase.
+       .replace(/([,;:])\s*(?:[.,;:]\s*)+/g, '$1 ')
+       .replace(/([.!?])\s*[,;:]+/g, '$1')
        .replace(/\s{2,}/g, ' ')
        .replace(/\s+$/, '')
        .trim();

@@ -436,8 +436,10 @@ async function tentarModoAudio(){
   const chaveAudio = gerador.chaveCap(estado.livro.id, estado.capIdx);
   const reg = await bd.obter('capAudio', chaveAudio);
   if(!reg) return false;
-  if(reg.nFrases !== estado.frases.length || !Array.isArray(reg.mapa) || !reg.mapa.length){
-    // registro velho, incompleto ou de outra divisão de frases: descartar
+  if(!gerador.audioServe(reg, estado.frases.length) ||
+     !Array.isArray(reg.mapa) || !reg.mapa.length){
+    // outra voz, outra divisão de frases, outra preferência de citações, ou
+    // registro incompleto: descartar e regerar
     await bd.apagar('capAudio', chaveAudio);
     gerador._esquecer(estado.livro.id, estado.capIdx);
     agendarGeracao();
@@ -672,8 +674,13 @@ function _duracaoEstimadaFrase(i){
 
 function saltarSegundos(seg){
   if(!estado.livro || !estado.frases.length) return;
-  if(estado.modoAudio && estado.mapaAtual?.length){
-    const dur = Number.isFinite(audioEl.duration) ? audioEl.duration : null;
+  // Metadados ainda não carregados: currentTime é 0 e duration é NaN. Mexer
+  // agora jogaria o leitor para o começo do capítulo E gravaria isso como
+  // progresso. Cair no caminho por frases, que não depende da linha do tempo.
+  const midiaPronta = estado.modoAudio && audioEl.readyState >= 1 &&
+                      Number.isFinite(audioEl.duration) && audioEl.duration > 0;
+  if(midiaPronta && estado.mapaAtual?.length){
+    const dur = audioEl.duration;
     const alvo = audioEl.currentTime + seg;
     if(alvo < 0){
       // antes do início: recuar para o capítulo anterior, no fim dele
@@ -940,10 +947,13 @@ function atualizarMediaSession(){
     });
     navigator.mediaSession.setActionHandler('play', tocar);
     navigator.mediaSession.setActionHandler('pause', pausar);
-    // No carro, ⏮/⏭ mudam de capítulo (é o que se espera de "faixa") e os
-    // botões de retroceder/avançar saltam tempo, não frase.
-    navigator.mediaSession.setActionHandler('previoustrack', () => mudarCapitulo(-1));
-    navigator.mediaSession.setActionHandler('nexttrack', () => mudarCapitulo(1));
+    // ⏮/⏭ saltam TEMPO, não capítulo. Parece contraintuitivo, mas no carro é o
+    // certo: muitos volantes e centrais só expõem prev/next, e pular para um
+    // capítulo ainda não gerado cairia na voz do sistema — que no iPhone com a
+    // tela bloqueada não toca. O controle emudeceria em movimento. Trocar de
+    // capítulo continua disponível no app e no Modo Estrada.
+    navigator.mediaSession.setActionHandler('previoustrack', () => saltarSegundos(-15));
+    navigator.mediaSession.setActionHandler('nexttrack', () => saltarSegundos(30));
     navigator.mediaSession.setActionHandler('seekbackward', (d) => saltarSegundos(-(d?.seekOffset || 15)));
     navigator.mediaSession.setActionHandler('seekforward', (d) => saltarSegundos(d?.seekOffset || 30));
   }catch{}
@@ -1099,13 +1109,16 @@ function _atualizarBotaoPreparo(){
 
 async function prepararLivroInteiro(){
   if(!estado.livro || gerador.preparandoTudo) return;
+  // Guardar a referência do livro: o preparo pode levar horas e o usuário pode
+  // abrir outro livro no meio. Ler estado.livro no fim marcaria o livro errado.
+  const livroPreparo = estado.livro;
   const btn = $('btn-preparar-livro');
   const btnParar = $('btn-parar-preparo');
   const info = $('preparo-info');
   const barra = $('barra-preparo');
 
   // Aviso honesto de espaço ANTES de começar: áudio cru pesa muito.
-  const estimado = gerador.estimarBytesLivro(estado.livro);
+  const estimado = gerador.estimarBytesLivro(livroPreparo);
   const esp = await gerador.espacoLivre();
   let aviso = `Vou gerar o áudio de todo o livro (~${_mb(estimado)}).`;
   if(esp) aviso += ` Seu aparelho tem ${_mb(esp.livre)} livres.`;
@@ -1121,11 +1134,13 @@ async function prepararLivroInteiro(){
   barra.classList.remove('oculto');
   pedirWakeLock(); // não deixar a tela apagar e suspender a geração
 
+  let rotuloCap = '';
   gerador.aoPreparar = (ev) => {
     const pct = ev.total ? Math.round((ev.feitos / ev.total) * 100) : 0;
     $('preparo-barra').style.width = pct + '%';
     if(ev.estado === 'gerando'){
-      info.textContent = `Capítulo ${ev.feitos + 1} de ${ev.total}…`;
+      rotuloCap = `Capítulo ${ev.feitos + 1} de ${ev.total}`;
+      info.textContent = rotuloCap + '…';
     } else if(ev.estado === 'pronto'){
       info.textContent = `${ev.feitos} de ${ev.total} prontos`;
     } else if(ev.estado === 'sem-espaco'){
@@ -1136,14 +1151,16 @@ async function prepararLivroInteiro(){
   const aoMudarOrig = gerador.aoMudar;
   gerador.aoMudar = (ev) => {
     aoMudarOrig?.(ev);
-    if(gerador.preparandoTudo && ev.estado === 'gerando'){
-      info.textContent = `${info.textContent.split('—')[0].trim()} — frase ${ev.feito} de ${ev.total}`;
+    // Guardar o rótulo do capítulo numa variável em vez de recortar o texto já
+    // na tela: se a mensagem corrente fosse outra, a colagem saía sem sentido.
+    if(gerador.preparandoTudo && ev.estado === 'gerando' && rotuloCap){
+      info.textContent = `${rotuloCap} — frase ${ev.feito} de ${ev.total}`;
     }
   };
 
   let r;
   try{
-    r = await gerador.prepararLivroInteiro(estado.livro, estado.capIdx);
+    r = await gerador.prepararLivroInteiro(livroPreparo, estado.capIdx);
   }catch(err){
     r = {status: 'erro', erro: String(err?.message || err), feitos: 0, total: 0};
   }finally{
@@ -1153,9 +1170,10 @@ async function prepararLivroInteiro(){
     if(!estado.tocando && !estradaAberta()) soltarWakeLock();
   }
 
-  const completo = r.status === 'completo';
-  if(completo) await gerador.marcarPreparado(estado.livro.id, true);
-  else if(r.feitos > 0) await gerador.marcarPreparado(estado.livro.id, true); // preserva o que deu
+  // SÓ marcar quando o livro ficou inteiro em disco. Marcar um preparo parcial
+  // desligaria a poda por janela — o único freio de armazenamento no uso
+  // normal — justamente num aparelho que já estava sem espaço.
+  await gerador.marcarPreparado(livroPreparo.id, r.status === 'completo');
 
   const msgs = {
     completo: `Livro pronto ✓ ${r.feitos} capítulos com voz natural, prontos para a estrada.`,
@@ -1167,6 +1185,10 @@ async function prepararLivroInteiro(){
     'ja-rodando': 'Já está preparando.',
     erro: `Falhou: ${r.erro || ''}`
   };
+  // Se o usuário abriu outro livro no meio, não escrever o resultado na tela
+  // dele — seria "Livro pronto ✓" num livro que não tem áudio nenhum.
+  if(estado.livro?.id !== livroPreparo.id) return;
+
   info.textContent = msgs[r.status] || `${r.feitos} de ${r.total} prontos.`;
   $('preparo-barra').style.width = (r.total ? Math.round((r.feitos / r.total) * 100) : 0) + '%';
   _atualizarBotaoPreparo();
@@ -1386,7 +1408,11 @@ function ligarEventos(){
     window.PULAR_CITACOES = e.target.checked;
     await bd.salvar('config', {chave: 'pularCitacoes', valor: e.target.checked});
     if(!estado.livro) return;
-    // O texto falado mudou: o áudio já gerado não corresponde mais.
+    // O texto falado mudou, então o áudio gerado com a preferência antiga não
+    // serve mais. Não é preciso apagar nada aqui: cada registro guarda com que
+    // preferência foi gerado (gerador.audioServe), então o áudio dos OUTROS
+    // livros também é refeito quando eles forem abertos. Antes, só o livro
+    // aberto era invalidado e os demais liam "(SILVA, 2020)" para sempre.
     const estavaTocando = estado.tocando;
     if(estavaTocando) pausar();
     gerador.cancelarLivro(estado.livro.id);

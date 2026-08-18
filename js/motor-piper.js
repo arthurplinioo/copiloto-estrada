@@ -264,6 +264,21 @@ const gerador = {
 
   chaveCap(livroId, capIdx){ return `${livroId}:${capIdx}`; },
 
+  /* Um áudio guardado só serve se foi gerado com a MESMA voz, a mesma divisão
+     de frases e a mesma preferência de leitura de citações. Sem checar a
+     última, desligar "não ler referências" deixava todos os outros livros
+     lendo "(SILVA, 2020)" para sempre — o nº de frases não muda, então nada
+     percebia a diferença. */
+  _semCitacoesAgora(){ return window.PULAR_CITACOES !== false; },
+  audioServe(reg, nFrases){
+    if(!reg) return false;
+    if(reg.nFrases !== nFrases) return false;
+    if(reg.vozId !== piper.vozId) return false;
+    // registros antigos não têm o campo: tratar como "gerado com o padrão"
+    const gravado = reg.semCitacoes !== undefined ? reg.semCitacoes : true;
+    return gravado === this._semCitacoesAgora();
+  },
+
   async estadoCap(livroId, capIdx){
     const pronto = await bd.obter('capAudio', this.chaveCap(livroId, capIdx));
     if(pronto) return {estado: 'pronto', ...pronto};
@@ -273,6 +288,10 @@ const gerador = {
   cancelarLivro(livroId){
     this.fila = this.fila.filter(f => f.livro.id !== livroId);
     if(this.atual && this.atual.livroId === livroId) this.atual.cancelado = true;
+    // Um preparo completo em andamento DESTE livro também tem de parar. Sem
+    // isto ele seguia gerando (e reportava "completo") depois de o usuário
+    // trocar de voz, mexer nas citações ou apagar o livro da estante.
+    if(this.preparandoTudo && this.livroPreparando === livroId) this.cancelarPreparo = true;
     this._esquecer(livroId);
   },
 
@@ -334,6 +353,9 @@ const gerador = {
      cada troca de livro faria o leitor que alterna entre dois títulos perder
      horas de áudio já gerado toda vez. */
   async limparOutrosLivrosSePreciso(livroAtualId, limiar = 0.6){
+    // Nunca varrer enquanto um preparo completo está rodando: apagaria
+    // exatamente o livro que está sendo gerado para a viagem.
+    if(this.preparandoTudo) return false;
     try{
       const est = await navigator.storage?.estimate?.();
       if(est?.usage && est?.quota && est.usage / est.quota < limiar) return false;
@@ -440,6 +462,7 @@ const gerador = {
     for(let i = 0; this.ativo && i < 600; i++) await new Promise(r => setTimeout(r, 100));
     if(this.ativo) return {status: 'ocupado'};
     this.preparandoTudo = true;
+    this.livroPreparando = livro.id;
     this.ativo = true;
     this.cancelarPreparo = false;
     this.fila = [];
@@ -457,8 +480,7 @@ const gerador = {
         if(this.prontos.has(chave)){ feitos++; this.aoPreparar?.({feitos, total: ordem.length, capIdx, estado: 'pronto'}); continue; }
 
         const jaTem = await bd.obter('capAudio', chave);
-        if(jaTem && jaTem.vozId === piper.vozId &&
-           jaTem.nFrases === frasesDoCapitulo(livro.capitulos[capIdx]).length){
+        if(this.audioServe(jaTem, frasesDoCapitulo(livro.capitulos[capIdx]).length)){
           this.prontos.add(chave);
           feitos++;
           this.aoPreparar?.({feitos, total: ordem.length, capIdx, estado: 'pronto'});
@@ -482,6 +504,9 @@ const gerador = {
           this.falhas.delete(chave);
           feitos++;
         }catch(err){
+          // Cancelado no meio (troca de voz, livro apagado): a falha aqui é
+          // consequência do cancelamento, não um capítulo ruim. Sair.
+          if(this.cancelarPreparo || this.atual?.cancelado) break;
           const msg = String(err?.message || err);
           if(err?.incompativel){
             this.aoPreparar?.({feitos, total: ordem.length, estado: 'erro', erro: msg, incompativel: true});
@@ -495,15 +520,25 @@ const gerador = {
         }
         this.aoPreparar?.({feitos, total: ordem.length, capIdx, estado: 'pronto'});
       }
-      const status = this.cancelarPreparo ? 'cancelado' : (pulados ? 'parcial' : 'completo');
+      // 'completo' exige ter percorrido TODOS os capítulos sem cancelamento —
+      // antes um cancelamento saía pelo break e ainda dizia "completo".
+      const cancelado = this.cancelarPreparo || this.atual?.cancelado;
+      const status = cancelado ? 'cancelado'
+        : (feitos < ordem.length || pulados) ? 'parcial' : 'completo';
       this.aoPreparar?.({feitos, total: ordem.length, estado: status, pulados});
       return {status, feitos, total: ordem.length, pulados};
     }finally{
       this.preparandoTudo = false;
+      this.livroPreparando = null;
       this.atual = null;
       this.ativo = false;
+      // A fila normal encheu enquanto o lock estava tomado e ficou parada;
+      // destravar agora para o capítulo atual não esperar um novo pedido.
+      if(this.fila.length) this._rodar().catch(() => {});
     }
   },
+
+  livroPreparando: null,
 
   cancelarPreparo: false,
   pararPreparo(){
@@ -532,8 +567,9 @@ const gerador = {
         const existente = await bd.obter('capAudio', chave);
         if(existente){
           const frases = frasesDoCapitulo(livro.capitulos[capIdx]);
-          // áudio de outra voz ou com nº de frases diferente: refazer
-          if(existente.nFrases === frases.length && existente.vozId === piper.vozId){
+          // áudio de outra voz, outra divisão de frases ou outra preferência
+          // de citações: refazer
+          if(this.audioServe(existente, frases.length)){
             // Já estava pronto de uma sessão anterior. Avisar mesmo assim: sem
             // este aviso o app nunca trocava da voz do sistema para a neural
             // num capítulo cujo áudio já existia no banco.
@@ -617,14 +653,18 @@ const gerador = {
       if(!reg) throw new Error('Frase gerada sumiu do banco.');
       return reg.buf;
     });
-    await bd.salvar('capAudio', {chave: this.chaveCap(livro.id, capIdx), wav, mapa, duracao, vozId: vozAlvo, nFrases: frases.length});
+    await bd.salvar('capAudio', {
+      chave: this.chaveCap(livro.id, capIdx), wav, mapa, duracao,
+      vozId: vozAlvo, nFrases: frases.length,
+      semCitacoes: this._semCitacoesAgora()   // com que preferência foi gerado
+    });
     await bd.apagarPrefixo('wavs', prefixo);
     this.aoMudar?.({livroId: livro.id, capIdx, estado: 'pronto', duracao});
   },
 
   async apagarAudioLivro(livroId){
     this._esquecer(livroId);
-    this.marcarPreparado(livroId, false); // já não está inteiro em disco
+    await this.marcarPreparado(livroId, false); // já não está inteiro em disco
     await bd.apagarPrefixo('capAudio', `${livroId}:`);
     await bd.apagarPrefixo('wavs', `${livroId}:`);
   }
