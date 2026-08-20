@@ -54,7 +54,8 @@ verificar(`seletor com ${N_CAPITULOS} capítulos`,
 // ajudante grava um capítulo já fatiado, como o gerador de verdade faria.
 // vários testes trocam _gerarCapitulo por stubs; guardar o original para os
 // testes que precisam da geração de verdade
-ev('window.__gerarCapReal = gerador._gerarCapitulo.bind(gerador)');
+ev(`window.__gerarCapReal = gerador._gerarCapitulo.bind(gerador);
+    window.__apagarAudioReal = gerador.apagarAudioLivro.bind(gerador);`);
 
 await ev(`window.__gravarCap = async (livroId, capIdx, comAudioReal) => {
   const cap = estado.livros.find(l => l.id === livroId).capitulos[capIdx];
@@ -787,6 +788,86 @@ console.log('== tocar um bloco do meio e emendar o seguinte ==');
     `(bloco ${r.bloco} → ${r.blocoDepois}, capMudou=${r.capMudou})`);
   verificar('cursor continua na sequência', r.fraseDepois === r.tamBloco * 3,
     `(frase ${r.fraseDepois})`);
+}
+
+// ---------- o livro preparado sobrevive a fechar o app ----------
+console.log('== livro preparado continua lá depois de fechar o app ==');
+{
+  const r = await ev(`(async () => {
+    gerador._gerarCapitulo = window.__gerarCapReal;
+    gerador.fila = []; gerador.ativo = false; gerador.preparandoTudo = false;
+    if(window.__obterReal) bd.obter = window.__obterReal;
+    piper.armazenadas = async () => [piper.vozId];
+    piper.gerar = async () => montarWav({canais:1,taxa:22050,bits:16},[new Uint8Array(200)]);
+
+    const caps = [];
+    for(let c = 1; c <= 4; c++){
+      const fr = [];
+      for(let i = 1; i <= 25; i++) fr.push('Frase ' + i + ' do capitulo ' + c + '.');
+      caps.push({titulo: c + '. Cap ' + c, texto: fr.join(' '), incluir: true});
+    }
+    await bd.salvar('livros', {id:'guardado', titulo:'Guardado', autor:'', tipo:'txt',
+      capa:null, capitulos:caps, palavras:400, criadoEm:Date.now()});
+    estado.livros = await bd.todos('livros');
+    await abrirLivro('guardado');
+    gerador.prontos.clear(); gerador.falhas.clear();
+
+    const res = await gerador.prepararLivroInteiro(estado.livro, 0);
+    await gerador.marcarPreparado('guardado', res.status === 'completo');
+    const blocos = (await bd.chaves('capAudio')).filter(c => String(c).startsWith('guardado:')).length;
+
+    // "fechou o app": o estado em memória some, só o banco permanece
+    gerador.livrosPreparados = new Set();
+    gerador.prontos.clear();
+    await gerador.carregarPreparados();
+    const marcaSobreviveu = gerador.livrosPreparados.has('guardado');
+
+    // ouvir de novo NÃO pode fazer a poda comer o livro preparado
+    estado.capIdx = 0;
+    await gerador.limparForaDaJanela('guardado', 0);
+    const aposPoda = (await bd.chaves('capAudio')).filter(c => String(c).startsWith('guardado:')).length;
+    return {status: res.status, blocos, marcaSobreviveu, aposPoda};
+  })()`);
+  verificar('preparo terminou completo', r.status === 'completo', `(${r.status})`);
+  verificar('áudio ficou gravado no banco', r.blocos > 0, `(${r.blocos} blocos)`);
+  verificar('marca de "pronto offline" sobrevive ao fechar o app', r.marcaSobreviveu);
+  verificar('a poda por janela não come o livro preparado', r.aposPoda === r.blocos,
+    `(${r.blocos} → ${r.aposPoda})`);
+}
+
+console.log('== liberar espaço mantém livro e progresso ==');
+{
+  const r = await ev(`(async () => {
+    gerador.apagarAudioLivro = window.__apagarAudioReal;  // testes antes trocaram por no-op
+    estado.capIdx = 2; prepararCapitulo(); estado.fraseIdx = 5;
+    salvarProgressoAgora();
+    await new Promise(r => setTimeout(r, 40));
+    const progAntes = await bd.obter('progresso', 'guardado');
+    const antes = (await bd.chaves('capAudio')).filter(c => String(c).startsWith('guardado:')).length;
+    const tam = await gerador.tamanhoAudioLivro(estado.livro);
+
+    const co = window.confirm; window.confirm = () => true;
+    await liberarAudioDoLivro();
+    window.confirm = co;
+    await new Promise(r => setTimeout(r, 80));
+
+    const depois = (await bd.chaves('capAudio')).filter(c => String(c).startsWith('guardado:')).length;
+    const progDepois = await bd.obter('progresso', 'guardado');
+    return {antes, depois, infoTela: document.getElementById('preparo-info').textContent,
+            livroId: estado.livro && estado.livro.id,
+            preparando: gerador.preparandoTudo, tamMB: Math.round(tam.bytes / 1048576),
+            livroFicou: !!(await bd.obter('livros', 'guardado')),
+            progIgual: progAntes && progDepois &&
+                       progAntes.capIdx === progDepois.capIdx &&
+                       progAntes.fraseIdx === progDepois.fraseIdx,
+            desmarcado: !gerador.livrosPreparados.has('guardado')};
+  })()`);
+  verificar('mostra um tamanho plausível antes de liberar', r.tamMB > 0, `(${r.tamMB} MB)`);
+  verificar('liberar apaga todo o áudio do livro', r.antes > 0 && r.depois === 0,
+    `(${r.antes} → ${r.depois}; tela="${r.infoTela}")`);
+  verificar('o livro continua na estante', r.livroFicou);
+  verificar('o ponto da leitura é preservado', r.progIgual);
+  verificar('livro deixa de contar como "pronto offline"', r.desmarcado);
 }
 
 console.log(falhas.length ? `\n${falhas.length} FALHA(S)` : '\nSOBRECARGA OK');

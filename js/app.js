@@ -580,7 +580,15 @@ function atualizarIconePlay(){
 async function carregarBloco(bloco, fraseAlvo){
   if(!estado.livro) return false;
   const chaveB = gerador.chaveBloco(estado.livro.id, estado.capIdx, bloco);
-  const reg = await bd.obter('capAudio', chaveB);
+  let reg = null;
+  try{
+    reg = await bd.obter('capAudio', chaveB);
+  }catch(err){
+    // Banco recusando (cota, pressão de espaço no iOS): não pode emudecer a
+    // leitura. Devolver "não tem áudio" faz a voz do sistema assumir.
+    console.error('[copiloto:bloco]', err);
+    return false;
+  }
   if(!reg) return false;
   const nEsperado = Math.min(gerador.TAM_BLOCO, estado.frases.length - reg.de);
   if(!gerador.audioServe(reg, nEsperado) || !Array.isArray(reg.mapa) || !reg.mapa.length){
@@ -627,7 +635,7 @@ audioEl.addEventListener('ended', () => {
   // dormir (ou uma pausa manual) cai avançava o capítulo e salvava o progresso
   // adiante — o usuário acordava com o livro fora do lugar.
   if(!estado.modoAudio || !estado.tocando) return;
-  emendarProximoBloco();
+  emendarProximoBloco().catch(err => console.error('[copiloto:ended]', err));
 });
 
 /* Fim de um bloco: emendar o próximo do mesmo capítulo. Só quando acabam os
@@ -641,7 +649,13 @@ async function emendarProximoBloco(){
 
   estado.fraseIdx = b.ate + 1;
   _pausaProg = true; audioEl.pause(); _pausaProg = false;
-  if(await carregarBloco(proximo, estado.fraseIdx)){
+  let carregou = false;
+  try{
+    carregou = await carregarBloco(proximo, estado.fraseIdx);
+  }catch(err){
+    console.error('[copiloto:emenda]', err);
+  }
+  if(carregou){
     if(!estado.tocando) return;
     marcarFrase();
     audioEl.play().catch(() => {
@@ -789,6 +803,7 @@ async function _iniciarCapitulo(){
 
 async function tocar(){
   if(!estado.frases.length) return;
+  gerador.suspenso = false;  // o usuário quer ouvir: gerar de novo é o esperado
   if(estado.pausadoEm && Date.now() - estado.pausadoEm > 30000 && estado.fraseIdx > 0){
     estado.fraseIdx--; // retomar o fio depois de pausa longa
   }
@@ -1412,6 +1427,72 @@ function _atualizarBotaoPreparo(){
       ? 'Todos os capítulos já estão no aparelho.'
       : 'Gera o áudio de todos os capítulos para ouvir sem internet.';
   }
+  _mostrarEspacoDoLivro();
+}
+
+/* Mostra quanto o áudio DESTE livro ocupa e oferece liberar. O áudio é o que
+   mais pesa; sem isto o usuário só podia recuperar espaço apagando o livro
+   inteiro, perdendo também o texto e o progresso. */
+async function _mostrarEspacoDoLivro(){
+  const btnLib = $('btn-liberar-audio');
+  if(!btnLib || !estado.livro) return;
+  const livroId = estado.livro.id;
+  try{
+    const {bytes} = await gerador.tamanhoAudioLivro(estado.livro);
+    if(estado.livro?.id !== livroId) return;   // trocou de livro no meio
+    const vale = bytes > 2 * 1048576;          // menos que isso não compensa oferecer
+    btnLib.classList.toggle('oculto', !vale || gerador.preparandoTudo);
+    if(vale){
+      btnLib.textContent = `Liberar ${_mb(bytes)}`;
+      btnLib.disabled = false;
+    }
+  }catch{}
+}
+
+/* Apaga o áudio gerado deste livro, mantendo o livro e o ponto da leitura. */
+async function liberarAudioDoLivro(){
+  if(!estado.livro || gerador.preparandoTudo) return;
+  const livro = estado.livro;
+  const {bytes} = await gerador.tamanhoAudioLivro(livro);
+  const ok = confirm(
+    `Apagar o áudio já gerado de "${livro.titulo}" e liberar ${_mb(bytes)}?\n\n` +
+    'O livro e o ponto onde você parou continuam. Só o áudio sai — ' +
+    'ele pode ser gerado de novo quando você quiser.');
+  if(!ok) return;
+
+  const btnLib = $('btn-liberar-audio');
+  btnLib.disabled = true;
+  const estavaTocando = estado.tocando;
+  if(estavaTocando) pausar();
+  // soltar o áudio carregado antes de apagar o registro de onde ele veio
+  estado.modoAudio = false;
+  estado.blocoAtual = null;
+  if(estado.urlAudioAtual){
+    try{ URL.revokeObjectURL(estado.urlAudioAtual); }catch{}
+    estado.urlAudioAtual = null;
+  }
+  try{ audioEl.removeAttribute('src'); audioEl.load(); }catch{}
+
+  gerador.suspenso = true;   // não deixar o gerador reocupar o espaço agora
+  gerador.cancelarLivro(livro.id);
+  // Não engolir a falha: dizer "liberado" sem ter liberado seria mentir para
+  // quem está justamente tentando recuperar espaço.
+  try{
+    await gerador.apagarAudioLivro(livro.id);
+  }catch(err){
+    console.error('[copiloto:liberar]', err);
+    $('preparo-info').textContent = 'Não consegui apagar o áudio: ' + (err?.message || err);
+    btnLib.disabled = false;
+    return;
+  }
+  $('preparo-info').textContent = `${_mb(bytes)} liberados. O texto e o seu lugar na leitura continuam aqui.`;
+  _atualizarBotaoPreparo();
+  mostrarUsoArmazenamento();
+  // NÃO retomar sozinho: chamar tocar() aqui dispararia a geração de novo e
+  // reocuparia o espaço que o usuário acabou de liberar. Ele decide quando.
+  if(estavaTocando){
+    $('preparo-info').textContent += ' Toque em play para continuar (o áudio será gerado de novo).';
+  }
 }
 
 async function prepararLivroInteiro(){
@@ -1429,6 +1510,7 @@ async function prepararLivroInteiro(){
   // Guardar a referência do livro: o preparo pode levar horas e o usuário pode
   // abrir outro livro no meio. Ler estado.livro no fim marcaria o livro errado.
   const livroPreparo = estado.livro;
+  gerador.suspenso = false;
   const btn = $('btn-preparar-livro');
   const btnParar = $('btn-parar-preparo');
   const info = $('preparo-info');
@@ -1724,6 +1806,7 @@ function ligarEventos(){
   $('btn-baixar-voz').addEventListener('click', baixarVozPiper);
   $('btn-apagar-voz')?.addEventListener('click', apagarVozPiper);
   $('btn-preparar-livro')?.addEventListener('click', prepararLivroInteiro);
+  $('btn-liberar-audio')?.addEventListener('click', liberarAudioDoLivro);
   $('btn-parar-preparo')?.addEventListener('click', () => {
     gerador.pararPreparo();
     $('preparo-info').textContent = 'Parando…';

@@ -420,6 +420,9 @@ const gerador = {
   pedir(livro, capIdx){
     if(capIdx < 0 || capIdx >= livro.capitulos.length) return;
     if(!livro.capitulos[capIdx].incluir) return;
+    // Geração suspensa (o usuário acabou de liberar espaço): não voltar a
+    // encher o aparelho sozinho. Só play ou "preparar" religam.
+    if(this.suspenso) return;
     const chave = this.chaveCap(livro.id, capIdx);
     // Já concluído nesta sessão: NÃO reenfileirar. Sem esta guarda, o aviso de
     // "pronto" fazia o app reagendar o mesmo capítulo, que ficava pronto de
@@ -438,7 +441,8 @@ const gerador = {
   // Capítulo em que o leitor está agora — a limpeza de emergência por falta de
   // espaço precisa preservar a vizinhança DELE, não a do capítulo em geração.
   capLendo: 0,
-  frasLendo: 0,   // frase em que o leitor está, para gerar aquele bloco antes
+  frasLendo: 0,
+  suspenso: false,  // true logo após "liberar espaço": não regerar sozinho
 
   /* ---------- preparar o livro inteiro ----------
      No iOS a geração só roda com o app aberto na frente, então deixar o livro
@@ -719,6 +723,36 @@ const gerador = {
                       bloco: b, nBlocos: faixas.length, de, ate, duracao});
     }
     this.aoMudar?.({livroId: livro.id, capIdx, estado: 'pronto', nBlocos: faixas.length});
+  },
+
+  /* Quanto o áudio de UM livro está ocupando (estimativa).
+     Conta só as CHAVES: ler cada registro para somar byteLength traria
+     centenas de MB de áudio para a memória — exatamente o que estamos
+     tentando poupar. O tamanho vem da estimativa do livro rateada pelos
+     blocos que já existem, o que basta para o usuário decidir. */
+  async tamanhoAudioLivro(livro){
+    const livroId = typeof livro === 'string' ? livro : livro?.id;
+    if(!livroId) return {bytes: 0, blocos: 0, blocosTotais: 0};
+    let blocos = 0, blocosTotais = 0;
+    try{
+      const pref = `${livroId}:`;
+      for(const c of await bd.chaves('capAudio')){
+        if(String(c).startsWith(pref)) blocos++;
+      }
+      if(typeof livro === 'object' && livro?.capitulos){
+        for(let i = 0; i < livro.capitulos.length; i++){
+          if(livro.capitulos[i].incluir === false) continue;
+          blocosTotais += this.blocosDoCapitulo(
+            frasesDoCapitulo(livro.capitulos[i]).length).length;
+        }
+      }
+    }catch{}
+    const totalLivro = (typeof livro === 'object' && livro?.capitulos)
+      ? this.estimarBytesLivro(livro) : 0;
+    const bytes = blocosTotais > 0
+      ? Math.round(totalLivro * Math.min(1, blocos / blocosTotais))
+      : blocos * 3.5 * 1048576; // sem o livro em mãos: ~3,5 MB por bloco
+    return {bytes, blocos, blocosTotais};
   },
 
   async apagarAudioLivro(livroId){
