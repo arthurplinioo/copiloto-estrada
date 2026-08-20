@@ -568,6 +568,8 @@ function atualizarIconePlay(){
   const icone = estado.tocando ? '❚❚' : '▶';
   $('btn-play').textContent = icone;
   $('estrada-play').textContent = icone;
+  // manter a central do carro em sincronia com o botão do app
+  atualizarPosicaoMediaSession();
 }
 
 /* ---------- via Piper (arquivo de áudio) ---------- */
@@ -605,8 +607,11 @@ audioEl.addEventListener('timeupdate', () => {
     estado.fraseIdx = idx;
     marcarFrase();
     salvarProgressoAgora();
+    atualizarPosicaoMediaSession(); // barra de progresso da central do carro
   }
 });
+// metadados prontos: só então dá para informar a duração ao carro
+audioEl.addEventListener('loadedmetadata', atualizarPosicaoMediaSession);
 audioEl.addEventListener('ended', () => {
   // Sem o guard de 'tocando', um 'ended' já enfileirado quando o timer de
   // dormir (ou uma pausa manual) cai avançava o capítulo e salvava o progresso
@@ -1096,6 +1101,30 @@ function atualizarMediaSession(){
     navigator.mediaSession.setActionHandler('nexttrack', () => saltarSegundos(30));
     navigator.mediaSession.setActionHandler('seekbackward', (d) => saltarSegundos(-(d?.seekOffset || 15)));
     navigator.mediaSession.setActionHandler('seekforward', (d) => saltarSegundos(d?.seekOffset || 30));
+    // Arrastar a barra na tela do carro
+    try{
+      navigator.mediaSession.setActionHandler('seekto', (d) => {
+        if(d?.seekTime == null) return;
+        saltarSegundos(d.seekTime - (estado.modoAudio ? audioEl.currentTime : 0));
+      });
+    }catch{}
+    atualizarPosicaoMediaSession();
+  }catch{}
+}
+
+/* Alimenta a barra de progresso e o estado play/pause da central do carro.
+   Sem isto o CarPlay mostra o título, mas a barra fica parada em zero. */
+function atualizarPosicaoMediaSession(){
+  if(!('mediaSession' in navigator)) return;
+  try{
+    navigator.mediaSession.playbackState = estado.tocando ? 'playing' : 'paused';
+    if(estado.modoAudio && Number.isFinite(audioEl.duration) && audioEl.duration > 0){
+      navigator.mediaSession.setPositionState({
+        duration: audioEl.duration,
+        playbackRate: audioEl.playbackRate || 1,
+        position: Math.min(audioEl.currentTime, audioEl.duration)
+      });
+    }
   }catch{}
 }
 
