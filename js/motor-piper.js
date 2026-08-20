@@ -264,6 +264,38 @@ const gerador = {
 
   chaveCap(livroId, capIdx){ return `${livroId}:${capIdx}`; },
 
+  /* ---------- áudio em BLOCOS ----------
+     Antes, o capítulo inteiro virava um WAV só: num capítulo de 360 frases o
+     leitor esperava a síntese das 360 antes de ouvir a primeira palavra —
+     dezenas de minutos. Agora o capítulo é fatiado em blocos curtos; o bloco 1
+     fica pronto em cerca de um minuto e a leitura já começa, enquanto o resto
+     é gerado atrás. Também derruba o pico de memória e o tamanho de cada
+     registro no banco. */
+  TAM_BLOCO: 18,
+
+  chaveBloco(livroId, capIdx, b){ return `${livroId}:${capIdx}:b${b}`; },
+
+  /* Faixas [de, ate] de cada bloco de um capítulo com nFrases frases. */
+  blocosDoCapitulo(nFrases){
+    const faixas = [];
+    for(let de = 0; de < nFrases; de += this.TAM_BLOCO){
+      faixas.push({de, ate: Math.min(de + this.TAM_BLOCO, nFrases) - 1});
+    }
+    return faixas.length ? faixas : [{de: 0, ate: -1}];
+  },
+
+  blocoDaFrase(fraseIdx){ return Math.floor(Math.max(0, fraseIdx) / this.TAM_BLOCO); },
+
+  /* Um capítulo está pronto quando TODOS os seus blocos servem. */
+  async capituloPronto(livroId, capIdx, nFrases){
+    const faixas = this.blocosDoCapitulo(nFrases);
+    for(let b = 0; b < faixas.length; b++){
+      const reg = await bd.obter('capAudio', this.chaveBloco(livroId, capIdx, b));
+      if(!this.audioServe(reg, faixas[b].ate - faixas[b].de + 1)) return false;
+    }
+    return true;
+  },
+
   /* Um áudio guardado só serve se foi gerado com a MESMA voz, a mesma divisão
      de frases e a mesma preferência de leitura de citações. Sem checar a
      última, desligar "não ler referências" deixava todos os outros livros
@@ -321,10 +353,13 @@ const gerador = {
       const fora = (idx) => idx !== preservar &&
         (idx < capIdxAtual - antes || idx > capIdxAtual + depois);
 
+      // Chaves são "livro:cap" (formato antigo) e "livro:cap:bN" (blocos): em
+      // ambos o capítulo é o 1º segmento depois do prefixo. Ler a chave inteira
+      // como número dava NaN nas de bloco, e elas nunca eram apagadas.
       for(const c of await bd.chaves('capAudio')){
         const s = String(c);
         if(!s.startsWith(pref)) continue;
-        const idx = Number(s.slice(pref.length));
+        const idx = Number(s.slice(pref.length).split(':')[0]);
         if(Number.isNaN(idx) || !fora(idx)) continue;
         await bd.apagar('capAudio', c);
         this.prontos.delete(s);
@@ -343,7 +378,7 @@ const gerador = {
       for(const k of [...this.prontos]){
         const s = String(k);
         if(!s.startsWith(pref)) continue;
-        const idx = Number(s.slice(pref.length));
+        const idx = Number(s.slice(pref.length).split(':')[0]);
         if(!Number.isNaN(idx) && fora(idx)) this.prontos.delete(s);
       }
     }catch{}
@@ -403,6 +438,7 @@ const gerador = {
   // Capítulo em que o leitor está agora — a limpeza de emergência por falta de
   // espaço precisa preservar a vizinhança DELE, não a do capítulo em geração.
   capLendo: 0,
+  frasLendo: 0,   // frase em que o leitor está, para gerar aquele bloco antes
 
   /* ---------- preparar o livro inteiro ----------
      No iOS a geração só roda com o app aberto na frente, então deixar o livro
@@ -479,8 +515,9 @@ const gerador = {
         const chave = this.chaveCap(livro.id, capIdx);
         if(this.prontos.has(chave)){ feitos++; this.aoPreparar?.({feitos, total: ordem.length, capIdx, estado: 'pronto'}); continue; }
 
-        const jaTem = await bd.obter('capAudio', chave);
-        if(this.audioServe(jaTem, frasesDoCapitulo(livro.capitulos[capIdx]).length)){
+        // pronto = todos os blocos do capítulo servem
+        if(await this.capituloPronto(livro.id, capIdx,
+             frasesDoCapitulo(livro.capitulos[capIdx]).length)){
           this.prontos.add(chave);
           feitos++;
           this.aoPreparar?.({feitos, total: ordem.length, capIdx, estado: 'pronto'});
@@ -564,23 +601,17 @@ const gerador = {
       const chave = this.chaveCap(livro.id, capIdx);
       this.atual = {livroId: livro.id, capIdx, cancelado: false};
       try{
-        const existente = await bd.obter('capAudio', chave);
-        if(existente){
-          const frases = frasesDoCapitulo(livro.capitulos[capIdx]);
-          // áudio de outra voz, outra divisão de frases ou outra preferência
-          // de citações: refazer
-          if(this.audioServe(existente, frases.length)){
-            // Já estava pronto de uma sessão anterior. Avisar mesmo assim: sem
-            // este aviso o app nunca trocava da voz do sistema para a neural
-            // num capítulo cujo áudio já existia no banco.
-            this.falhas.delete(chave);
-            this.prontos.add(chave); // impede reenfileiramento em laço
-            this.aoMudar?.({livroId: livro.id, capIdx, estado: 'pronto',
-                            duracao: existente.duracao, jaExistia: true});
-            continue;
-          }
-          await bd.apagar('capAudio', chave);
-          this.prontos.delete(chave);
+        const frases = frasesDoCapitulo(livro.capitulos[capIdx]);
+        // Pronto = todos os blocos servem (mesma voz, mesma divisão de frases,
+        // mesma preferência de citações).
+        if(await this.capituloPronto(livro.id, capIdx, frases.length)){
+          // Já estava pronto de uma sessão anterior. Avisar mesmo assim: sem
+          // este aviso o app nunca trocava da voz do sistema para a neural
+          // num capítulo cujo áudio já existia no banco.
+          this.falhas.delete(chave);
+          this.prontos.add(chave); // impede reenfileiramento em laço
+          this.aoMudar?.({livroId: livro.id, capIdx, estado: 'pronto', jaExistia: true});
+          continue;
         }
         await this._gerarCapitulo(livro, capIdx);
         this.falhas.delete(chave);
@@ -634,32 +665,60 @@ const gerador = {
       await piper.baixar(vozAlvo);
       if(this.atual?.cancelado) return;
     }
-    // retomar de onde parou: frases já geradas ficam no banco
+    // Gerar BLOCO A BLOCO e publicar cada um assim que fica pronto: o leitor
+    // começa a ouvir no primeiro, sem esperar o capítulo inteiro.
+    const faixas = this.blocosDoCapitulo(frases.length);
     const feitas = new Set((await bd.chaves('wavs')).filter(c => String(c).startsWith(prefixo)));
-    for(let i = 0; i < frases.length; i++){
+    // ordem: começar pelo bloco onde o leitor está, para ele ouvir antes
+    const inicio = (this.capLendo === capIdx) ? this.blocoDaFrase(this.frasLendo || 0) : 0;
+    const ordem = [];
+    for(let k = 0; k < faixas.length; k++) ordem.push((inicio + k) % faixas.length);
+
+    let feitosNoCap = 0;
+    for(const b of ordem){
       if(this.atual?.cancelado) return;
-      // usuário trocou de voz no meio: abortar esta geração
       if(piper.vozId !== vozAlvo) return;
-      const chave = `${prefixo}${i}`;
-      if(feitas.has(chave)) continue;
-      const buf = await piper.gerar(frases[i].falado);
-      if(this.atual?.cancelado) return;
-      await bd.salvar('wavs', {chave, buf});
-      this.aoMudar?.({livroId: livro.id, capIdx, estado: 'gerando', feito: i + 1, total: frases.length});
+      const {de, ate} = faixas[b];
+      const chaveB = this.chaveBloco(livro.id, capIdx, b);
+      const nDoBloco = ate - de + 1;
+
+      if(this.audioServe(await bd.obter('capAudio', chaveB), nDoBloco)){
+        feitosNoCap += nDoBloco;
+        continue; // bloco já pronto de uma sessão anterior
+      }
+
+      for(let i = de; i <= ate; i++){
+        if(this.atual?.cancelado) return;
+        if(piper.vozId !== vozAlvo) return;
+        const chave = `${prefixo}${i}`;
+        if(!feitas.has(chave)){
+          const buf = await piper.gerar(frases[i].falado);
+          if(this.atual?.cancelado) return;
+          await bd.salvar('wavs', {chave, buf});
+        }
+        feitosNoCap++;
+        this.aoMudar?.({livroId: livro.id, capIdx, estado: 'gerando',
+                        feito: feitosNoCap, total: frases.length,
+                        bloco: b, nBlocos: faixas.length});
+      }
+
+      const {wav, mapa, duracao} = await concatenarWavsDoBanco(nDoBloco, async (k) => {
+        const reg = await bd.obter('wavs', `${prefixo}${de + k}`);
+        if(!reg) throw new Error('Frase gerada sumiu do banco.');
+        return reg.buf;
+      });
+      await bd.salvar('capAudio', {
+        chave: chaveB, wav, mapa, duracao,
+        vozId: vozAlvo, nFrases: nDoBloco,
+        semCitacoes: this._semCitacoesAgora(),
+        de, ate, bloco: b, nBlocos: faixas.length, nFrasesCap: frases.length
+      });
+      for(let i = de; i <= ate; i++) await bd.apagar('wavs', `${prefixo}${i}`);
+      // avisa o app: já dá para tocar este pedaço
+      this.aoMudar?.({livroId: livro.id, capIdx, estado: 'bloco-pronto',
+                      bloco: b, nBlocos: faixas.length, de, ate, duracao});
     }
-    // montar capítulo único lendo do banco uma frase por vez (memória baixa)
-    const {wav, mapa, duracao} = await concatenarWavsDoBanco(frases.length, async (i) => {
-      const reg = await bd.obter('wavs', `${prefixo}${i}`);
-      if(!reg) throw new Error('Frase gerada sumiu do banco.');
-      return reg.buf;
-    });
-    await bd.salvar('capAudio', {
-      chave: this.chaveCap(livro.id, capIdx), wav, mapa, duracao,
-      vozId: vozAlvo, nFrases: frases.length,
-      semCitacoes: this._semCitacoesAgora()   // com que preferência foi gerado
-    });
-    await bd.apagarPrefixo('wavs', prefixo);
-    this.aoMudar?.({livroId: livro.id, capIdx, estado: 'pronto', duracao});
+    this.aoMudar?.({livroId: livro.id, capIdx, estado: 'pronto', nBlocos: faixas.length});
   },
 
   async apagarAudioLivro(livroId){

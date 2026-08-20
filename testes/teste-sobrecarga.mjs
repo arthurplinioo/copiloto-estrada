@@ -49,18 +49,41 @@ verificar(`seletor com ${N_CAPITULOS} capítulos`,
 
 // ---------- gerar áudio falso para todos os capítulos ----------
 // WAV real (montarWav) para o caminho de áudio ser o mesmo do app.
-await ev(`(async () => {
+// O áudio é guardado em BLOCOS (o capítulo inteiro num WAV só fazia o leitor
+// esperar a síntese de centenas de frases antes da primeira palavra). Este
+// ajudante grava um capítulo já fatiado, como o gerador de verdade faria.
+// vários testes trocam _gerarCapitulo por stubs; guardar o original para os
+// testes que precisam da geração de verdade
+ev('window.__gerarCapReal = gerador._gerarCapitulo.bind(gerador)');
+
+await ev(`window.__gravarCap = async (livroId, capIdx, comAudioReal) => {
+  const cap = estado.livros.find(l => l.id === livroId).capitulos[capIdx];
+  const frases = frasesDoCapitulo(cap);
+  const faixas = gerador.blocosDoCapitulo(frases.length);
   const fmt = {canais: 1, taxa: 22050, bits: 16};
-  for(let i = 0; i < ${N_CAPITULOS}; i++){
-    const frases = frasesDoCapitulo(estado.livro.capitulos[i]);
-    const mapa = frases.map((_, k) => ({inicio: k * 0.5, dur: 0.5}));
-    const pcm = new Uint8Array(Math.round(22050 * 2 * 0.5 * frases.length) & ~1);
+  for(let b = 0; b < faixas.length; b++){
+    const {de, ate} = faixas[b];
+    const n = ate - de + 1;
+    const mapa = Array.from({length: n}, (_, k) => ({inicio: k * 0.5, dur: 0.5}));
+    const wav = comAudioReal
+      ? montarWav(fmt, [new Uint8Array(Math.round(22050 * 2 * 0.5 * n) & ~1)])
+      : new ArrayBuffer(64);
     await bd.salvar('capAudio', {
-      chave: gerador.chaveCap('sobrecarga', i),
-      wav: montarWav(fmt, [pcm]), mapa,
-      duracao: frases.length * 0.5, vozId: piper.vozId, nFrases: frases.length
+      chave: gerador.chaveBloco(livroId, capIdx, b),
+      wav, mapa, duracao: n * 0.5,
+      vozId: piper.vozId, nFrases: n, semCitacoes: gerador._semCitacoesAgora(),
+      de, ate, bloco: b, nBlocos: faixas.length, nFrasesCap: frases.length
     });
   }
+};
+window.__apagarCap = async (livroId, capIdx) => {
+  for(const c of await bd.chaves('capAudio')){
+    if(String(c).startsWith(livroId + ':' + capIdx + ':')) await bd.apagar('capAudio', c);
+  }
+};`);
+
+await ev(`(async () => {
+  for(let i = 0; i < ${N_CAPITULOS}; i++) await window.__gravarCap('sobrecarga', i, true);
 })()`);
 
 // ---------- ligar o modo neural e neutralizar o que o jsdom não faz ----------
@@ -169,7 +192,7 @@ console.log('== leitura contínua quando o áudio neural ainda não ficou pronto
     falaSistema.parar = () => {};
     // metade dos capítulos SEM áudio pronto: o app tem de cair na voz do sistema
     for(let i = 0; i < ${N_CAPITULOS}; i += 2){
-      await bd.apagar('capAudio', gerador.chaveCap('sobrecarga', i));
+      await window.__apagarCap('sobrecarga', i);
     }
     estado.capIdx = 0; prepararCapitulo(); estado.fraseIdx = 0;
     window.__erros = [];
@@ -328,13 +351,7 @@ console.log('== pipeline de geração não entra em laço ==');
     const aoMudarOrig = gerador.aoMudar;
     gerador.aoMudar = (ev) => { eventos++; if(eventos < 400) aoMudarOrig(ev); };
     for(let i = 0; i < 6; i++){
-      await bd.salvar('capAudio', {
-        chave: gerador.chaveCap('sobrecarga', i),
-        wav: new ArrayBuffer(64),
-        mapa: [{inicio: 0, dur: 1}],
-        duracao: 1, vozId: piper.vozId,
-        nFrases: frasesDoCapitulo(estado.livro.capitulos[i]).length
-      });
+      await window.__gravarCap('sobrecarga', i, false);
     }
     estado.capIdx = 0; gerador.capLendo = 0;
     agendarGeracao();
@@ -398,10 +415,14 @@ console.log('== nunca duas vozes ao mesmo tempo ==');
       if(loja === 'capAudio') await new Promise(r => setTimeout(r, 120));
       return obterReal(loja, chave);
     };
-    await bd.salvar('capAudio', {chave: gerador.chaveCap('sobrecarga', 0),
+    // bloco único: o capítulo do teste cabe num bloco só
+    await bd.salvar('capAudio', {chave: gerador.chaveBloco('sobrecarga', 0, 0),
       wav: montarWav({canais:1,taxa:22050,bits:16}, [new Uint8Array(4410)]),
       mapa: estado.frases.map((_, k) => ({inicio: k*0.1, dur: 0.1})),
-      duracao: estado.frases.length*0.1, vozId: piper.vozId, nFrases: estado.frases.length});
+      duracao: estado.frases.length*0.1, vozId: piper.vozId,
+      nFrases: estado.frases.length, semCitacoes: gerador._semCitacoesAgora(),
+      de: 0, ate: estado.frases.length - 1, bloco: 0, nBlocos: 1,
+      nFrasesCap: estado.frases.length});
     window.__falouDurante = 0;
     const p = _iniciarCapitulo();
     // durante o await, disparar exatamente o evento que acionava o socorro
@@ -447,10 +468,12 @@ console.log('== salto por tempo ==');
     piper.vozId='pt_BR-faber-medium'; estado.vozPiperPronta=true;
     estado.capIdx = 3; prepararCapitulo(); estado.fraseIdx = 0;
     const n = estado.frases.length;
-    await bd.salvar('capAudio', {chave: gerador.chaveCap('sobrecarga', 3),
+    await bd.salvar('capAudio', {chave: gerador.chaveBloco('sobrecarga', 3, 0),
       wav: montarWav({canais:1,taxa:22050,bits:16},[new Uint8Array(4410)]),
       mapa: estado.frases.map((_, k) => ({inicio: k*10, dur: 10})),
-      duracao: n*10, vozId: piper.vozId, nFrases: n});
+      duracao: n*10, vozId: piper.vozId, nFrases: n,
+      semCitacoes: gerador._semCitacoesAgora(),
+      de: 0, ate: n - 1, bloco: 0, nBlocos: 1, nFrasesCap: n});
     estado.tocando = true;
     await _iniciarCapitulo();
     // linha do tempo controlada pelo teste. readyState: o jsdom não carrega
@@ -687,6 +710,83 @@ console.log('== rolagem contínua não joga o livro todo no DOM ==');
   verificar('rolar para o topo estende para trás', r.aposTopo > r.passos[r.passos.length-1],
     `(${r.passos[r.passos.length-1]} → ${r.aposTopo})`);
   verificar('DOM continua enxuto', r.frases < 400, `(${r.frases} frases na tela)`);
+}
+
+// ---------- capítulo longo: ouvir sem esperar a síntese inteira ----------
+console.log('== capítulo grande começa a tocar no primeiro bloco ==');
+{
+  const r = await ev(`(async () => {
+    if(window.__obterReal) bd.obter = window.__obterReal;  // limpar stubs anteriores
+    gerador._gerarCapitulo = window.__gerarCapReal;        // geração de verdade
+    gerador.fila = []; gerador.ativo = false; gerador.preparandoTudo = false;
+    // capítulo com 200 frases, como um capítulo real de livro
+    const frases = [];
+    for(let i = 1; i <= 200; i++) frases.push('Esta e a frase numero ' + i + ' do capitulo longo.');
+    const livro = {id:'longo', titulo:'Longo', autor:'', tipo:'txt', capa:null,
+      capitulos:[{titulo:'1. Capitulo longo', texto: frases.join(' '), incluir:true}],
+      palavras: 2000, criadoEm: Date.now()};
+    await bd.salvar('livros', livro);
+    estado.livros = await bd.todos('livros');
+    await abrirLivro('longo');
+    const nFrases = estado.frases.length;
+    const faixas = gerador.blocosDoCapitulo(nFrases);
+
+    // contar quantas frases foram sintetizadas ATÉ o primeiro bloco ficar pronto
+    let sintetizadas = 0, atePrimeiroBloco = null;
+    gerador.aoMudar = (ev) => {
+      if(ev.estado === 'gerando') sintetizadas = ev.feito;
+      if(ev.estado === 'bloco-pronto' && atePrimeiroBloco === null) atePrimeiroBloco = sintetizadas;
+    };
+    piper.gerar = async () => montarWav({canais:1,taxa:22050,bits:16},[new Uint8Array(200)]);
+    piper.armazenadas = async () => [piper.vozId];
+    gerador.prontos.clear(); gerador.falhas.clear();
+    gerador.capLendo = 0; gerador.frasLendo = 0;
+    gerador.atual = {livroId:'longo', capIdx:0, cancelado:false};
+    let erroGer = null;
+    try{ await gerador._gerarCapitulo(livro, 0); }catch(e){ erroGer = String(e && e.message || e); }
+    gerador.aoMudar = null;
+
+    const chaves = (await bd.chaves('capAudio')).filter(c => String(c).startsWith('longo:0:'));
+    return {nFrases, nBlocos: faixas.length, atePrimeiroBloco, blocosNoBanco: chaves.length,
+            tamBloco: gerador.TAM_BLOCO, erroGer, amostra: (await bd.chaves('capAudio')).map(String).slice(0,3)};
+  })()`);
+  verificar('capítulo longo é fatiado em vários blocos', r.nBlocos > 5,
+    `(${r.nFrases} frases em ${r.nBlocos} blocos)`);
+  verificar('primeiro áudio sai após poucas frases, não após o capítulo todo',
+    r.atePrimeiroBloco <= r.tamBloco,
+    `(${r.atePrimeiroBloco} frases para o 1º bloco, de ${r.nFrases})`);
+  verificar('a espera cai pelo menos 5×', r.atePrimeiroBloco * 5 <= r.nFrases,
+    `(${r.atePrimeiroBloco} vs ${r.nFrases})`);
+  verificar('todos os blocos foram gravados', r.blocosNoBanco === r.nBlocos,
+    `(${r.blocosNoBanco} de ${r.nBlocos}; erro=${r.erroGer}; chaves=${JSON.stringify(r.amostra)})`);
+}
+
+console.log('== tocar um bloco do meio e emendar o seguinte ==');
+{
+  const r = await ev(`(async () => {
+    estado.capIdx = 0; prepararCapitulo();
+    // posicionar numa frase do 3º bloco
+    const alvo = gerador.TAM_BLOCO * 2 + 3;
+    estado.fraseIdx = alvo;
+    estado.tocando = true;
+    const ok = await tentarModoAudio();
+    const b = estado.blocoAtual;
+    const cobre = b && alvo >= b.de && alvo <= b.ate;
+    // emendar o próximo bloco (fim da mídia)
+    const capAntes = estado.capIdx;
+    await emendarProximoBloco();
+    const b2 = estado.blocoAtual;
+    return {ok, bloco: b?.bloco, cobre, blocoDepois: b2?.bloco,
+            capMudou: estado.capIdx !== capAntes, fraseDepois: estado.fraseIdx,
+            tamBloco: gerador.TAM_BLOCO};
+  })()`);
+  verificar('carrega o bloco que contém a frase pedida', r.ok && r.cobre,
+    `(bloco ${r.bloco})`);
+  verificar('fim do bloco emenda o próximo, sem trocar de capítulo',
+    r.blocoDepois === r.bloco + 1 && !r.capMudou,
+    `(bloco ${r.bloco} → ${r.blocoDepois}, capMudou=${r.capMudou})`);
+  verificar('cursor continua na sequência', r.fraseDepois === r.tamBloco * 3,
+    `(frase ${r.fraseDepois})`);
 }
 
 console.log(falhas.length ? `\n${falhas.length} FALHA(S)` : '\nSOBRECARGA OK');

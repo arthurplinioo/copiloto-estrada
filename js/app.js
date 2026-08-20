@@ -44,6 +44,7 @@ const estado = {
   vozPiperPronta: false,
   urlAudioAtual: null,
   mapaAtual: null,
+  blocoAtual: null,   // {bloco, de, ate, nBlocos} do pedaço de áudio carregado
   urlsCapas: new Map()
 };
 
@@ -573,36 +574,45 @@ function atualizarIconePlay(){
 }
 
 /* ---------- via Piper (arquivo de áudio) ---------- */
-async function tentarModoAudio(){
-  if(estado.motor !== 'piper' || !piper.disponivel || !estado.vozPiperPronta || !estado.livro) return false;
-  const chaveAudio = gerador.chaveCap(estado.livro.id, estado.capIdx);
-  const reg = await bd.obter('capAudio', chaveAudio);
+/* Carrega no <audio> o BLOCO que contém a frase pedida.
+   O capítulo é fatiado em blocos curtos justamente para a leitura poder
+   começar no primeiro, sem esperar a síntese do capítulo inteiro. */
+async function carregarBloco(bloco, fraseAlvo){
+  if(!estado.livro) return false;
+  const chaveB = gerador.chaveBloco(estado.livro.id, estado.capIdx, bloco);
+  const reg = await bd.obter('capAudio', chaveB);
   if(!reg) return false;
-  if(!gerador.audioServe(reg, estado.frases.length) ||
-     !Array.isArray(reg.mapa) || !reg.mapa.length){
-    // outra voz, outra divisão de frases, outra preferência de citações, ou
-    // registro incompleto: descartar e regerar
-    await bd.apagar('capAudio', chaveAudio);
-    gerador._esquecer(estado.livro.id, estado.capIdx);
+  const nEsperado = Math.min(gerador.TAM_BLOCO, estado.frases.length - reg.de);
+  if(!gerador.audioServe(reg, nEsperado) || !Array.isArray(reg.mapa) || !reg.mapa.length){
+    // outra voz, outra divisão de frases ou outra preferência: descartar
+    await bd.apagar('capAudio', chaveB);
     agendarGeracao();
     return false;
   }
   if(estado.urlAudioAtual) URL.revokeObjectURL(estado.urlAudioAtual);
   estado.urlAudioAtual = URL.createObjectURL(new Blob([reg.wav], {type: 'audio/wav'}));
   estado.mapaAtual = reg.mapa;
+  estado.blocoAtual = {bloco, de: reg.de, ate: reg.ate, nBlocos: reg.nBlocos};
   audioEl.src = estado.urlAudioAtual;
   audioEl.playbackRate = falaSistema.taxa;
-  const alvo = estado.mapaAtual[Math.min(estado.fraseIdx, estado.mapaAtual.length - 1)];
-  try{ audioEl.currentTime = alvo ? alvo.inicio : 0; }catch{}
+  const local = Math.max(0, Math.min((fraseAlvo ?? estado.fraseIdx) - reg.de, reg.mapa.length - 1));
+  try{ audioEl.currentTime = reg.mapa[local]?.inicio || 0; }catch{}
   estado.modoAudio = true;
   return true;
+}
+
+async function tentarModoAudio(){
+  if(estado.motor !== 'piper' || !piper.disponivel || !estado.vozPiperPronta || !estado.livro) return false;
+  return carregarBloco(gerador.blocoDaFrase(estado.fraseIdx), estado.fraseIdx);
 }
 
 audioEl.addEventListener('timeupdate', () => {
   if(!estado.modoAudio || !estado.mapaAtual) return;
   const t = audioEl.currentTime;
-  let idx = estado.mapaAtual.findIndex(m => t < m.inicio + m.dur);
-  if(idx < 0) idx = estado.mapaAtual.length - 1;
+  let local = estado.mapaAtual.findIndex(m => t < m.inicio + m.dur);
+  if(local < 0) local = estado.mapaAtual.length - 1;
+  // o mapa é do BLOCO; o cursor de leitura é do capítulo
+  const idx = (estado.blocoAtual?.de || 0) + local;
   if(idx !== estado.fraseIdx){
     estado.fraseIdx = idx;
     marcarFrase();
@@ -617,8 +627,35 @@ audioEl.addEventListener('ended', () => {
   // dormir (ou uma pausa manual) cai avançava o capítulo e salvava o progresso
   // adiante — o usuário acordava com o livro fora do lugar.
   if(!estado.modoAudio || !estado.tocando) return;
-  avancarCapituloAuto();
+  emendarProximoBloco();
 });
+
+/* Fim de um bloco: emendar o próximo do mesmo capítulo. Só quando acabam os
+   blocos é que se troca de capítulo. Se o bloco seguinte ainda não foi gerado,
+   a voz do sistema assume dali — a leitura não para para esperar. */
+async function emendarProximoBloco(){
+  const b = estado.blocoAtual;
+  const proximo = (b?.bloco ?? 0) + 1;
+  const temMais = b && proximo < (b.nBlocos ?? 1) && (b.ate + 1) < estado.frases.length;
+  if(!temMais){ avancarCapituloAuto(); return; }
+
+  estado.fraseIdx = b.ate + 1;
+  _pausaProg = true; audioEl.pause(); _pausaProg = false;
+  if(await carregarBloco(proximo, estado.fraseIdx)){
+    if(!estado.tocando) return;
+    marcarFrase();
+    audioEl.play().catch(() => {
+      estado.modoAudio = false;
+      if(estado.tocando) tocarFraseSistema();
+    });
+    agendarGeracao(); // manter a fila adiantada
+  } else {
+    // bloco ainda não gerado: seguir na voz do sistema e trocar quando ficar pronto
+    estado.modoAudio = false;
+    agendarGeracao();
+    if(estado.tocando) tocarFraseSistema();
+  }
+}
 audioEl.addEventListener('error', () => {
   if(!estado.modoAudio || !estado.tocando) return;
   estado.modoAudio = false;
@@ -792,7 +829,28 @@ function alternarPlay(){ if(estado.tocando) pausar(); else tocar(); }
 function irParaFrase(i){
   estado.fraseIdx = Math.max(0, Math.min(i, estado.frases.length - 1));
   if(estado.modoAudio && estado.mapaAtual){
-    const m = estado.mapaAtual[estado.fraseIdx];
+    const b = estado.blocoAtual;
+    // A frase pedida está em outro bloco? Carregar o bloco certo. Sem isto o
+    // índice global caía fora do mapa (que é do bloco) e o áudio ia para o
+    // lugar errado — ou para o começo.
+    if(b && (estado.fraseIdx < b.de || estado.fraseIdx > b.ate)){
+      const alvo = estado.fraseIdx;
+      const tocava = estado.tocando;
+      carregarBloco(gerador.blocoDaFrase(alvo), alvo).then(ok => {
+        if(!ok){
+          // bloco ainda não gerado: seguir pela voz do sistema
+          estado.modoAudio = false;
+          agendarGeracao();
+          if(tocava) tocarFraseSistema(); else marcarFrase();
+          return;
+        }
+        marcarFrase();
+        if(tocava) audioEl.play().catch(() => {});
+      }).catch(() => {});
+      salvarProgressoAgora();
+      return;
+    }
+    const m = estado.mapaAtual[estado.fraseIdx - (b?.de || 0)];
     try{ audioEl.currentTime = m ? m.inicio : 0; }catch{}
     marcarFrase();
   } else if(estado.tocando){
@@ -827,12 +885,16 @@ function saltarSegundos(seg){
   if(midiaPronta && estado.mapaAtual?.length){
     const dur = audioEl.duration;
     const alvo = audioEl.currentTime + seg;
+    const b = estado.blocoAtual;
+    // A linha do tempo é a do BLOCO. Sair dela pelas pontas significa ir para
+    // o bloco vizinho — e só no fim do último bloco é que se troca de capítulo.
     if(alvo < 0){
-      // antes do início: recuar para o capítulo anterior, no fim dele
+      if(b && b.de > 0){ irParaFrase(Math.max(0, b.de - 1)); return; }
       const ant = proximoCapIncluido(-1);
       if(ant >= 0){ trocarCapitulo(ant, -1); return; }
       try{ audioEl.currentTime = 0; }catch{}
-    } else if(dur != null && alvo >= dur){
+    } else if(alvo >= dur){
+      if(b && b.ate + 1 < estado.frases.length){ irParaFrase(b.ate + 1); return; }
       avancarCapituloAuto();
       return;
     } else {
@@ -840,9 +902,9 @@ function saltarSegundos(seg){
     }
     // sincronizar o cursor de frase com a nova posição
     const t = audioEl.currentTime;
-    let idx = estado.mapaAtual.findIndex(m => t < m.inicio + m.dur);
-    if(idx < 0) idx = estado.mapaAtual.length - 1;
-    estado.fraseIdx = idx;
+    let local = estado.mapaAtual.findIndex(m => t < m.inicio + m.dur);
+    if(local < 0) local = estado.mapaAtual.length - 1;
+    estado.fraseIdx = (b?.de || 0) + local;
     marcarFrase();
     salvarProgressoAgora();
     return;
@@ -887,6 +949,7 @@ function avancarCapituloAuto(){
   // parar motor atual sem tocar em estado.tocando
   _pausaProg = true;
   estado.modoAudio = false;
+  estado.blocoAtual = null;   // o áudio carregado era do capítulo anterior
   audioEl.pause();
   _pausaProg = false;
   falaSistema.parar();
@@ -907,6 +970,7 @@ function trocarCapitulo(novoIdx, posFrase){
   const estavaTocando = estado.tocando;
   _pausaProg = true;
   estado.modoAudio = false;
+  estado.blocoAtual = null;
   audioEl.pause();
   _pausaProg = false;
   falaSistema.parar();
@@ -928,7 +992,8 @@ function mudarCapitulo(dir){
 /* ---------- geração Piper em segundo plano ---------- */
 function agendarGeracao(){
   if(estado.motor !== 'piper' || !piper.disponivel || !estado.vozPiperPronta || !estado.livro) return;
-  gerador.capLendo = estado.capIdx; // referência da limpeza de emergência
+  gerador.capLendo = estado.capIdx;    // referência da limpeza de emergência
+  gerador.frasLendo = estado.fraseIdx; // gera primeiro o bloco onde ele está
   // Gerar capítulo atual + próximos 2 em segundo plano — quando o leitor
   // chegar lá, o áudio já vai estar pronto. Mais que isso estoura a cota
   // do navegador (cada capítulo em WAV pesa dezenas de MB).
@@ -955,9 +1020,13 @@ gerador.aoMudar = (ev) => {
   if(ev.estado === 'erro' && ev.definitivo) _errosCap.set(chave, ev.erro || 'falha desconhecida');
   else if(ev.estado === 'pronto' || ev.estado === 'gerando') _errosCap.delete(chave);
   atualizarEstadoAudioUI(ev);
-  // Áudio natural ficou pronto para o capítulo atual enquanto a voz do sistema
-  // estava lendo? Trocar imediatamente para o áudio Piper na frase atual.
-  if(ev.estado === 'pronto' && ev.capIdx === estado.capIdx
+  // Áudio natural disponível para onde o leitor está? Trocar já.
+  // 'bloco-pronto' é o que faz a espera cair de dezenas de minutos para ~1min:
+  // basta o bloco QUE CONTÉM a frase atual ficar pronto para a voz neural
+  // entrar, sem esperar o capítulo inteiro.
+  const chegouOndeEstou = ev.estado === 'bloco-pronto' &&
+    estado.fraseIdx >= ev.de && estado.fraseIdx <= ev.ate;
+  if((ev.estado === 'pronto' || chegouOndeEstou) && ev.capIdx === estado.capIdx
      && estado.tocando && !estado.modoAudio && !_trocandoVoz){
     _trocarParaPiperAgora();
   }
@@ -999,14 +1068,34 @@ async function atualizarEstadoAudioUI(ev){
   if(!el) return;
   if(estado.motor !== 'piper' || !piper.disponivel){ el.textContent = ''; return; }
   if(!estado.vozPiperPronta){
-    el.textContent = 'Voz neural ainda não baixada — usando a voz do sistema.';
+    // Aviso honesto: a voz do sistema é a que NÃO sai no som do carro nem
+    // sobrevive à tela bloqueada no iPhone. Quem estava ouvindo só pelo
+    // celular provavelmente estava nela sem saber.
+    el.textContent = 'Voz do sistema (só toca com a tela ligada e não sai no som do carro). Baixe a voz neural no painel ⚙️.';
+    return;
+  }
+  if(estado.tocando && !estado.modoAudio){
+    el.textContent = 'Preparando a voz natural… por ora é a voz do sistema, que não sai no som do carro.';
     return;
   }
   // A voz (modelo) já está baixada e funciona offline.
   // O que pode demorar é a GERAÇÃO do áudio (texto → fala) para este capítulo.
   if(ev && ev.capIdx === estado.capIdx){
     if(ev.estado === 'gerando'){
-      el.textContent = `Convertendo texto em fala: frase ${ev.feito} de ${ev.total}… (a voz já está salva no aparelho)`;
+      // Mostrar o progresso DO BLOCO, não do capítulo: "frase 4 de 18" diz que
+      // falta pouco para começar a ouvir; "frase 4 de 360" parecia eterno —
+      // e era, porque antes o áudio só tocava com o capítulo todo pronto.
+      const dentro = ev.nBlocos > 1
+        ? ((ev.feito - 1) % gerador.TAM_BLOCO) + 1
+        : ev.feito;
+      const doBloco = ev.nBlocos > 1 ? Math.min(gerador.TAM_BLOCO, ev.total) : ev.total;
+      el.textContent = ev.nBlocos > 1
+        ? `Preparando o próximo pedaço: ${dentro} de ${doBloco}… (a leitura começa assim que ficar pronto)`
+        : `Convertendo texto em fala: frase ${dentro} de ${doBloco}…`;
+    } else if(ev.estado === 'bloco-pronto'){
+      el.textContent = ev.nBlocos > 1
+        ? `Voz natural pronta até aqui (pedaço ${ev.bloco + 1} de ${ev.nBlocos}) — o resto continua sendo preparado.`
+        : 'Áudio natural pronto ✓';
     } else if(ev.estado === 'baixando-voz'){
       el.textContent = 'Baixando o modelo desta voz… (uma vez só)';
     } else if(ev.estado === 'pronto'){
@@ -1262,6 +1351,35 @@ async function preencherVozesPiper(){
    ===================================================================== */
 const _mb = (n) => `${Math.round(n / 1048576)} MB`;
 
+/* ---------- manter a preparação viva em segundo plano ----------
+   O iOS congela a página assim que o app sai da frente — inclusive o Web
+   Worker que sintetiza a voz. A ÚNICA exceção é uma página com áudio tocando:
+   o sistema mantém a sessão de mídia viva. Então, enquanto o livro está sendo
+   preparado, tocamos um silêncio em laço. É o que permite trocar de app (ou
+   apagar a tela) sem a geração parar.
+   Só existe durante o preparo; não vale para navegação comum. */
+let _audioVivo = null;
+
+function _iniciarSessaoViva(){
+  if(_audioVivo) return;
+  try{
+    const sil = montarWav({canais: 1, taxa: 22050, bits: 16}, [new Uint8Array(44100)]); // 1 s
+    _audioVivo = new Audio(URL.createObjectURL(new Blob([sil], {type: 'audio/wav'})));
+    _audioVivo.loop = true;
+    _audioVivo.volume = 0.0001; // inaudível, mas conta como mídia tocando
+    _audioVivo.play().catch(() => {});
+  }catch{ _audioVivo = null; }
+}
+
+function _pararSessaoViva(){
+  if(!_audioVivo) return;
+  try{
+    _audioVivo.pause();
+    if(_audioVivo.src.startsWith('blob:')) URL.revokeObjectURL(_audioVivo.src);
+  }catch{}
+  _audioVivo = null;
+}
+
 function _atualizarBotaoPreparo(){
   const bloco = $('preparo-viagem');
   if(!bloco) return;
@@ -1324,14 +1442,16 @@ async function prepararLivroInteiro(){
   if(esp && estimado > esp.livre * 0.9){
     aviso += '\n\nProvavelmente NÃO cabe tudo. Vou preparar o máximo que couber, começando pelo capítulo atual.';
   }
-  aviso += '\n\nDeixe o app aberto e o aparelho ligado na tomada. Pode demorar bastante.\n\nComeçar?';
+  aviso += '\n\nPode demorar. Você já pode ouvir enquanto prepara, e dá para usar '
+        +  'outros apps: a preparação segue em segundo plano.\n\nDeixe o aparelho na tomada.\n\nComeçar?';
   if(!confirm(aviso)) return;
 
   btn.disabled = true;
   btn.textContent = 'Preparando…';
   btnParar.classList.remove('oculto');
   barra.classList.remove('oculto');
-  pedirWakeLock(); // não deixar a tela apagar e suspender a geração
+  pedirWakeLock();      // manter a tela ligada enquanto o app estiver na frente
+  _iniciarSessaoViva(); // e manter a geração viva se o usuário trocar de app
 
   let rotuloCap = '';
   gerador.aoPreparar = (ev) => {
@@ -1365,6 +1485,7 @@ async function prepararLivroInteiro(){
   }finally{
     gerador.aoMudar = aoMudarOrig;
     gerador.aoPreparar = null;
+    _pararSessaoViva();
     btnParar.classList.add('oculto');
     if(!estado.tocando && !estradaAberta()) soltarWakeLock();
   }
