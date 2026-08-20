@@ -381,36 +381,176 @@ function prepararCapitulo(){
   atualizarEstadoAudioUI();
 }
 
-function desenharCapitulo(){
-  const alvo = $('texto-leitura');
-  alvo.innerHTML = '';
-  // NaN como sentinela: qualquer índice de parágrafo difere dele. Usar -1 aqui
-  // colidia com o parágrafo do título do capítulo e deixava pEl nulo.
+/* =====================================================================
+   Leitura contínua
+   O livro rola de ponta a ponta como num leitor comum, em vez de trocar a
+   tela a cada capítulo. Renderizamos os capítulos por demanda (o atual e os
+   vizinhos, estendendo conforme a rolagem): jogar um livro inteiro no DOM de
+   uma vez são dezenas de milhares de elementos e trava o celular.
+   O ÁUDIO continua sendo por capítulo — estado.frases é sempre o capítulo
+   corrente. A rolagem é só a apresentação; a máquina de tocar não muda.
+   ===================================================================== */
+const CAPS_VIZINHOS = 1;      // quantos capítulos desenhar antes/depois
+
+/* Enquanto o usuário rola para ler adiante, a frase que está tocando não pode
+   arrastar a tela de volta a cada troca — seria impossível ler. O botão
+   "voltar à leitura" religa o acompanhamento. */
+let _rolagemDoUsuario = false;
+let _pararRolagem = null;
+
+function _marcarRolagemManual(){
+  _rolagemDoUsuario = true;
+  $('btn-voltar-leitura')?.classList.remove('oculto');
+  clearTimeout(_pararRolagem);
+  // se o leitor parar de rolar e a frase atual estiver visível, voltar a seguir
+  _pararRolagem = setTimeout(() => {
+    const s = $('texto-leitura').querySelector('.frase.atual');
+    if(s && _estaVisivel(s)) _seguirLeitura();
+  }, 2500);
+}
+
+function _estaVisivel(el){
+  const cx = $('texto-leitura').getBoundingClientRect();
+  const r = el.getBoundingClientRect();
+  return r.bottom > cx.top && r.top < cx.bottom;
+}
+
+function _seguirLeitura(){
+  _rolagemDoUsuario = false;
+  clearTimeout(_pararRolagem);
+  $('btn-voltar-leitura')?.classList.add('oculto');
+  const s = $('texto-leitura').querySelector('.frase.atual');
+  s?.scrollIntoView({block: 'center', behavior: 'smooth'});
+}
+
+function _secaoCapitulo(capIdx){
+  const cap = estado.livro.capitulos[capIdx];
+  const sec = document.createElement('section');
+  sec.className = 'cap-secao';
+  sec.dataset.cap = capIdx;
+
+  const h = document.createElement('h2');
+  h.className = 'cap-cabeca';
+  h.textContent = cap.titulo || `Trecho ${capIdx + 1}`;
+  sec.appendChild(h);
+
+  const frases = capIdx === estado.capIdx ? estado.frases : frasesDoCapitulo(cap);
   let parAtual = NaN, pEl = null;
-  estado.frases.forEach((f, i) => {
+  frases.forEach((f, i) => {
     if(f.par !== parAtual || !pEl){
       parAtual = f.par;
       pEl = document.createElement(f.titulo ? 'h3' : 'p');
-      alvo.appendChild(pEl);
+      if(f.titulo) pEl.classList.add('titulo-secao');
+      sec.appendChild(pEl);
     }
     const span = document.createElement('span');
     span.className = 'frase';
     span.dataset.i = i;
+    span.dataset.cap = capIdx;
     span.textContent = f.texto + ' ';
-    span.addEventListener('click', () => irParaFrase(i));
     pEl.appendChild(span);
   });
+  return sec;
+}
+
+function desenharCapitulo(){
+  const alvo = $('texto-leitura');
+  alvo.innerHTML = '';
+  const inc = indicesIncluidos(estado.livro);
+  const pos = inc.indexOf(estado.capIdx);
+  const de = Math.max(0, pos - CAPS_VIZINHOS);
+  const ate = Math.min(inc.length - 1, pos + CAPS_VIZINHOS);
+  for(let k = de; k <= ate; k++) alvo.appendChild(_secaoCapitulo(inc[k]));
+  alvo.dataset.de = de;
+  alvo.dataset.ate = ate;
   marcarFrase();
+}
+
+/* Estende a rolagem quando o leitor chega perto das pontas. */
+function _estenderLeitura(){
+  const alvo = $('texto-leitura');
+  if(!estado.livro || !alvo.dataset.ate) return;
+  const inc = indicesIncluidos(estado.livro);
+  let de = Number(alvo.dataset.de), ate = Number(alvo.dataset.ate);
+  const margem = 600;
+  if(alvo.scrollHeight - alvo.scrollTop - alvo.clientHeight < margem && ate < inc.length - 1){
+    ate++;
+    alvo.appendChild(_secaoCapitulo(inc[ate]));
+    alvo.dataset.ate = ate;
+  }
+  if(alvo.scrollTop < margem && de > 0){
+    de--;
+    const altaAntes = alvo.scrollHeight;
+    alvo.insertBefore(_secaoCapitulo(inc[de]), alvo.firstChild);
+    // manter o texto parado sob o dedo depois de inserir acima
+    alvo.scrollTop += alvo.scrollHeight - altaAntes;
+    alvo.dataset.de = de;
+  }
+}
+
+/* ---------- pular de trecho em trecho ----------
+   "trecho"  = parágrafo (a unidade de leitura na tela)
+   "título"  = cabeçalho de seção dentro do capítulo
+   "capítulo"= o capítulo inteiro (já existia)
+   Todos movem o CURSOR DE LEITURA, não só a rolagem: quem estiver ouvindo
+   continua de onde pulou. */
+function irParaParagrafo(dir){
+  if(!estado.frases.length) return;
+  const parAtualIdx = estado.frases[estado.fraseIdx]?.par;
+  let i = estado.fraseIdx;
+  // andar até a primeira frase de um parágrafo diferente
+  while(i >= 0 && i < estado.frases.length && estado.frases[i].par === parAtualIdx) i += dir;
+  if(i < 0){
+    const ant = proximoCapIncluido(-1);
+    if(ant >= 0) trocarCapitulo(ant, -1);
+    return;
+  }
+  if(i >= estado.frases.length){ avancarCapituloAuto(); return; }
+  if(dir < 0){
+    // recuar até o COMEÇO desse parágrafo
+    const alvoPar = estado.frases[i].par;
+    while(i > 0 && estado.frases[i - 1].par === alvoPar) i--;
+  }
+  _seguirLeitura();
+  irParaFrase(i);
+}
+
+function irParaTitulo(dir){
+  if(!estado.frases.length) return;
+  let i = estado.fraseIdx + dir;
+  while(i >= 0 && i < estado.frases.length){
+    if(estado.frases[i].titulo){ _seguirLeitura(); irParaFrase(i); return; }
+    i += dir;
+  }
+  // não há mais títulos neste capítulo: cair para o capítulo vizinho
+  const vizinho = proximoCapIncluido(dir);
+  if(vizinho >= 0){ _seguirLeitura(); trocarCapitulo(vizinho, dir < 0 ? -1 : 0); }
+}
+
+/* Clique numa frase: se for de outro capítulo, troca de capítulo antes. */
+function _cliqueNoTexto(e){
+  const span = e.target.closest?.('.frase');
+  if(!span) return;
+  const cap = Number(span.dataset.cap);
+  const i = Number(span.dataset.i);
+  if(Number.isNaN(cap) || Number.isNaN(i)) return;
+  if(cap !== estado.capIdx){ trocarCapitulo(cap, 0); }
+  irParaFrase(i);
 }
 
 function marcarFrase(){
   if(!estado.livro) return;
   const alvo = $('texto-leitura');
   alvo.querySelectorAll('.frase.atual').forEach(e => e.classList.remove('atual'));
-  const span = alvo.querySelector(`.frase[data-i="${estado.fraseIdx}"]`);
+  alvo.querySelectorAll('.cap-secao.lendo').forEach(e => e.classList.remove('lendo'));
+  // Com o livro inteiro rolando, há frases com o mesmo índice em vários
+  // capítulos: mirar sempre a do capítulo em leitura.
+  const span = alvo.querySelector(
+    `.cap-secao[data-cap="${estado.capIdx}"] .frase[data-i="${estado.fraseIdx}"]`);
   if(span){
     span.classList.add('atual');
-    span.scrollIntoView({block: 'center', behavior: 'auto'});
+    span.closest('.cap-secao')?.classList.add('lendo');
+    if(!_rolagemDoUsuario) span.scrollIntoView({block: 'center', behavior: 'auto'});
   }
   $('estrada-frase').textContent = estado.frases[estado.fraseIdx]?.texto || '';
   const pct = estado.frases.length ? Math.round((estado.fraseIdx / estado.frases.length) * 100) : 0;
@@ -1096,19 +1236,49 @@ const _mb = (n) => `${Math.round(n / 1048576)} MB`;
 function _atualizarBotaoPreparo(){
   const bloco = $('preparo-viagem');
   if(!bloco) return;
-  const ligado = estado.motor === 'piper' && piper.disponivel && estado.vozPiperPronta && estado.livro;
-  bloco.classList.toggle('oculto', !ligado);
-  if(!ligado) return;
-  const preparado = estado.livro && gerador.livrosPreparados.has(estado.livro.id);
   const btn = $('btn-preparar-livro');
-  if(!gerador.preparandoTudo){
-    btn.textContent = preparado ? 'Livro pronto ✓ (preparar de novo)' : 'Preparar livro inteiro';
+  const info = $('preparo-info');
+  // O bloco aparece sempre que há um livro aberto. Escondê-lo enquanto a voz
+  // não estava baixada tornava a opção invisível JUSTAMENTE para quem estava
+  // procurando por ela — quem ainda não configurou a voz é quem mais precisa
+  // do aviso de que dá para deixar o livro pronto para ouvir offline.
+  if(!estado.livro || !piper.disponivel){ bloco.classList.add('oculto'); return; }
+  bloco.classList.remove('oculto');
+  if(gerador.preparandoTudo) return; // o preparo em curso controla o texto
+
+  const faltaVoz = estado.motor !== 'piper' || !estado.vozPiperPronta;
+  if(faltaVoz){
+    btn.textContent = 'Deixar livro disponível offline';
     btn.disabled = false;
+    btn.dataset.precisaVoz = '1';
+    info.textContent = 'Precisa da voz neural — toque para configurar.';
+    return;
+  }
+  delete btn.dataset.precisaVoz;
+  const preparado = gerador.livrosPreparados.has(estado.livro.id);
+  btn.textContent = preparado
+    ? 'Livro pronto offline ✓ (preparar de novo)'
+    : 'Deixar livro inteiro disponível offline';
+  btn.disabled = false;
+  if(!info.textContent || info.textContent.startsWith('Precisa da voz')){
+    info.textContent = preparado
+      ? 'Todos os capítulos já estão no aparelho.'
+      : 'Gera o áudio de todos os capítulos para ouvir sem internet.';
   }
 }
 
 async function prepararLivroInteiro(){
   if(!estado.livro || gerador.preparandoTudo) return;
+  // Sem voz neural configurada, o botão vira um atalho para o painel de voz
+  // em vez de não fazer nada.
+  if($('btn-preparar-livro')?.dataset.precisaVoz){
+    $('painel-voz').classList.remove('oculto');
+    $('sel-motor').value = 'piper';
+    $('sel-motor').dispatchEvent(new Event('change'));
+    $('painel-voz').scrollIntoView({behavior: 'smooth', block: 'center'});
+    $('preparo-info').textContent = 'Baixe a voz neural acima e volte aqui.';
+    return;
+  }
   // Guardar a referência do livro: o preparo pode levar horas e o usuário pode
   // abrir outro livro no meio. Ler estado.livro no fim marcaria o livro errado.
   const livroPreparo = estado.livro;
@@ -1344,6 +1514,17 @@ function ligarEventos(){
   $('btn-frase-prox').addEventListener('click', avancarFrase);
   $('btn-voltar-15').addEventListener('click', () => saltarSegundos(-15));
   $('btn-avancar-30').addEventListener('click', () => saltarSegundos(30));
+
+  // leitura contínua: rolagem, clique em qualquer frase do livro e navegação
+  const areaTexto = $('texto-leitura');
+  areaTexto.addEventListener('click', _cliqueNoTexto);
+  areaTexto.addEventListener('scroll', () => { _marcarRolagemManual(); _estenderLeitura(); },
+                              {passive: true});
+  $('btn-voltar-leitura')?.addEventListener('click', _seguirLeitura);
+  $('nav-par-ant')?.addEventListener('click', () => irParaParagrafo(-1));
+  $('nav-par-prox')?.addEventListener('click', () => irParaParagrafo(1));
+  $('nav-tit-ant')?.addEventListener('click', () => irParaTitulo(-1));
+  $('nav-tit-prox')?.addEventListener('click', () => irParaTitulo(1));
   $('btn-cap-ant').addEventListener('click', () => mudarCapitulo(-1));
   $('btn-cap-prox').addEventListener('click', () => mudarCapitulo(1));
   $('sel-capitulo').addEventListener('change', (e) => trocarCapitulo(Number(e.target.value), 0));

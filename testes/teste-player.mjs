@@ -140,6 +140,109 @@ console.log('== voz incompatível não trava a leitura ==');
     txt.includes('não funciona') && !txt.includes('Gather'), `("${txt}")`);
 }
 
+console.log('== leitura contínua (rolagem do livro) ==');
+{
+  const r = ev(`(() => {
+    const area = document.getElementById('texto-leitura');
+    return {
+      secoes: [...area.querySelectorAll('.cap-secao')].map(s => Number(s.dataset.cap)),
+      lendo: Number(area.querySelector('.cap-secao.lendo')?.dataset.cap),
+      frasesTemCap: [...area.querySelectorAll('.frase')].every(s => s.dataset.cap !== undefined),
+      janela: {de: Number(area.dataset.de), ate: Number(area.dataset.ate)}
+    };
+  })()`);
+  verificar('rende mais de um capítulo na tela', r.secoes.length >= 2,
+    `(seções: ${r.secoes.join(',')})`);
+  verificar('capítulos vêm em ordem', r.secoes.every((v, i, a) => i === 0 || v > a[i-1]));
+  verificar('marca qual capítulo está em leitura', r.secoes.includes(r.lendo),
+    `(lendo=${r.lendo})`);
+  verificar('cada frase sabe a que capítulo pertence', r.frasesTemCap);
+
+  // Rolar até o fim acrescenta o capítulo seguinte. Este livro de teste tem
+  // poucos capítulos incluídos, então a janela pode já cobrir todos — nesse
+  // caso o certo é NÃO acrescentar nada (a cobertura de verdade está no
+  // teste de sobrecarga, com 24 capítulos).
+  const est = ev(`(() => {
+    // partir do PRIMEIRO capítulo: se a janela já estiver no fim do livro,
+    // não há o que estender e o teste não mediria nada
+    const inc0 = indicesIncluidos(estado.livro);
+    estado.capIdx = inc0[0]; prepararCapitulo(); desenharCapitulo();
+    const area = document.getElementById('texto-leitura');
+    const antes = area.querySelectorAll('.cap-secao').length;
+    Object.defineProperty(area, 'scrollHeight', {configurable:true, get:()=>1000});
+    Object.defineProperty(area, 'clientHeight', {configurable:true, get:()=>400});
+    area.scrollTop = 600;
+    _estenderLeitura();
+    return {antes, depois: area.querySelectorAll('.cap-secao').length,
+            total: indicesIncluidos(estado.livro).length};
+  })()`);
+  const esperado = Math.min(est.total, est.antes + 1);
+  verificar('rolar até o fim estende o livro (até o último capítulo)',
+    est.depois === esperado, `(${est.antes} → ${est.depois}, total ${est.total})`);
+  verificar('não inventa capítulo além do fim do livro', est.depois <= est.total);
+
+  // clicar numa frase de outro capítulo troca de capítulo
+  const clique = ev(`(() => {
+    const area = document.getElementById('texto-leitura');
+    const outra = [...area.querySelectorAll('.frase')]
+      .find(s => Number(s.dataset.cap) !== estado.capIdx);
+    if(!outra) return {pulou: true};
+    const antes = estado.capIdx;
+    outra.click();
+    return {antes, depois: estado.capIdx, trocou: estado.capIdx !== antes};
+  })()`);
+  verificar('clicar em frase de outro capítulo troca de capítulo',
+    clique.pulou || clique.trocou, `(${clique.antes} → ${clique.depois})`);
+}
+
+console.log('== navegar por trecho e por título ==');
+{
+  const r = ev(`(() => {
+    estado.capIdx = 0; prepararCapitulo(); estado.fraseIdx = 0;
+    const parInicial = estado.frases[0].par;
+    irParaParagrafo(1);
+    const mudouPar = estado.frases[estado.fraseIdx].par !== parInicial;
+    estado.fraseIdx = 0;
+    irParaTitulo(1);
+    const noTitulo = !!estado.frases[estado.fraseIdx]?.titulo;
+    return {mudouPar, noTitulo, idx: estado.fraseIdx};
+  })()`);
+  verificar('próximo trecho muda de parágrafo', r.mudouPar);
+  verificar('próximo título cai num cabeçalho', r.noTitulo, `(frase ${r.idx})`);
+
+  // rolagem manual suspende o acompanhamento; o botão religa
+  const seguir = ev(`(() => {
+    _marcarRolagemManual();
+    const suspendeu = _rolagemDoUsuario === true &&
+      !document.getElementById('btn-voltar-leitura').classList.contains('oculto');
+    _seguirLeitura();
+    const religou = _rolagemDoUsuario === false &&
+      document.getElementById('btn-voltar-leitura').classList.contains('oculto');
+    return {suspendeu, religou};
+  })()`);
+  verificar('rolar à mão para de arrastar a tela', seguir.suspendeu);
+  verificar('"voltar à leitura" religa o acompanhamento', seguir.religou);
+}
+
+console.log('== opção de deixar offline é sempre visível ==');
+{
+  const r = ev(`(() => {
+    estado.motor = 'sistema'; estado.vozPiperPronta = false; piper.disponivel = true;
+    _atualizarBotaoPreparo();
+    const bloco = document.getElementById('preparo-viagem');
+    return {
+      visivelSemVoz: !bloco.classList.contains('oculto'),
+      rotulo: document.getElementById('btn-preparar-livro').textContent,
+      orienta: document.getElementById('preparo-info').textContent,
+      marcaPrecisaVoz: document.getElementById('btn-preparar-livro').dataset.precisaVoz === '1'
+    };
+  })()`);
+  verificar('bloco aparece mesmo sem a voz neural baixada', r.visivelSemVoz);
+  verificar('rótulo fala em offline', /offline/i.test(r.rotulo), `("${r.rotulo}")`);
+  verificar('explica que precisa da voz', /voz/i.test(r.orienta), `("${r.orienta}")`);
+  verificar('botão vira atalho para configurar a voz', r.marcaPrecisaVoz);
+}
+
 console.log('== janela de limpeza de áudio ==');
 {
   const temLimpeza = typeof ev('gerador.limparForaDaJanela') === 'function';

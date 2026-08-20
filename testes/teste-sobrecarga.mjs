@@ -656,5 +656,38 @@ console.log('== preferência de citações invalida o áudio de TODOS os livros 
   verificar('registro antigo sem o campo continua válido', r.antigo === true);
 }
 
+// ---------- leitura contínua num livro grande ----------
+console.log('== rolagem contínua não joga o livro todo no DOM ==');
+{
+  const r = await ev(`(async () => {
+    estado.capIdx = 10; prepararCapitulo(); desenharCapitulo();
+    const area = document.getElementById('texto-leitura');
+    Object.defineProperty(area, 'scrollHeight', {configurable:true, get:()=>1000});
+    Object.defineProperty(area, 'clientHeight', {configurable:true, get:()=>400});
+    const inicial = area.querySelectorAll('.cap-secao').length;
+    // rolar para o fim várias vezes: tem de estender de um em um
+    const passos = [];
+    for(let k = 0; k < 4; k++){
+      area.scrollTop = 600;
+      _estenderLeitura();
+      passos.push(area.querySelectorAll('.cap-secao').length);
+    }
+    // rolar para o topo estende para trás
+    area.scrollTop = 0;
+    _estenderLeitura();
+    const aposTopo = area.querySelectorAll('.cap-secao').length;
+    return {inicial, passos, aposTopo,
+            total: ${N_CAPITULOS},
+            frases: area.querySelectorAll('.frase').length};
+  })()`);
+  verificar('começa com poucos capítulos, não com o livro todo',
+    r.inicial < r.total, `(${r.inicial} de ${r.total})`);
+  verificar('cada rolagem acrescenta um capítulo',
+    r.passos.every((v, i) => v === r.inicial + i + 1), `(${r.passos.join(',')})`);
+  verificar('rolar para o topo estende para trás', r.aposTopo > r.passos[r.passos.length-1],
+    `(${r.passos[r.passos.length-1]} → ${r.aposTopo})`);
+  verificar('DOM continua enxuto', r.frases < 400, `(${r.frases} frases na tela)`);
+}
+
 console.log(falhas.length ? `\n${falhas.length} FALHA(S)` : '\nSOBRECARGA OK');
 process.exit(falhas.length ? 1 : 0);

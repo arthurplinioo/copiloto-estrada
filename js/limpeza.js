@@ -30,34 +30,71 @@ function tituloFalado(titulo){
 // Casar a FORMA, e não "tem um ano aí dentro", é o que evita engolir prosa
 // legítima: "(que fora construída em 1890 pelo avô)" tem ano e nome próprio,
 // mas não é citação — e precisa continuar sendo lida.
-const _NOME = String.raw`\p{Lu}[\p{L}.'’-]+`;
-const _LIGA = String.raw`(?:\s*(?:&|e|and)\s*|\s*,\s*|\s+)`;
-const _AUTORES = String.raw`${_NOME}(?:${_LIGA}${_NOME}){0,3}(?:\s+et\s+al\.?)?`;
-const _ANO = String.raw`(?:1[0-9]|20)\d{2}[a-z]?`;
-const _PAG = String.raw`(?:\s*,\s*(?:pp?\.?|p[áa]g(?:ina)?s?\.?|cap\.?|§)\s*[\d\s,.–—-]+)?`;
-const _UMA_CIT = String.raw`${_AUTORES}\s*,?\s*\(?\s*${_ANO}\s*\)?${_PAG}`;
-const RE_CITACAO_PAREN = new RegExp(
-  String.raw`\s*\(\s*(?:(?:cf|conf|ver|veja|see|apud|in)\.?\s+)?${_UMA_CIT}(?:\s*[;,]\s*${_UMA_CIT})*\s*\)`,
-  'gu'
-);
+// Como decidimos: em vez de uma regex grande (que sofria backtracking
+// catastrófico — travava em parênteses longos), pegamos parênteses curtos com
+// uma regex simples e conferimos o CONTEÚDO por token. É linear e mais fácil
+// de acertar: uma citação só tem nomes próprios, anos, ligações ("e", "&",
+// "de") e referências de página. Qualquer palavra comum ("que", "foi",
+// "assinado") denuncia que aquilo é prosa e não pode sumir da leitura.
+const RE_PAREN_CURTO = /\s*\(([^()]{0,200})\)/g;
+
+// Palavras minúsculas que PODEM aparecer numa citação sem descaracterizá-la.
+const _TOKENS_CITACAO = new Set([
+  'cf','conf','ver','veja','vide','see','apud','in','e','and','et','al',
+  'de','da','do','dos','das','del','della','di','van','von','le','la',
+  'p','pp','pag','pags','pagina','paginas','cap','caps','capitulo','sec','secao',
+  'n','no','nr','vol','ed','eds','org','orgs','coord','trad','ibid','op','cit','loc','sd'
+]);
+const _semAcento = (s) => s.normalize('NFD').replace(/\p{M}+/gu, '').toLowerCase();
+
+/* O conteúdo de um parêntese é uma citação bibliográfica? */
+function ehConteudoCitacao(dentro){
+  const bruto = String(dentro || '').trim();
+  if(!bruto || bruto.length > 200) return false;
+  // precisa de ano: sem ano não é referência
+  if(!/\b(?:1[0-9]|20)\d{2}[a-z]?\b/.test(bruto)) return false;
+  const pedacos = bruto.split(/[\s.,;:&/]+/).filter(Boolean);
+  if(!pedacos.length) return false;
+  let temNome = false;
+  for(const t of pedacos){
+    if(/^\d{1,4}[a-z]?(?:[-–—]\d{1,4})?$/i.test(t)) continue; // ano, página, "45-47"
+    if(/^[ivxlcdm]+$/i.test(t) && t.length <= 5) continue;    // volume romano
+    if(/^\p{Lu}/u.test(t)){ temNome = true; continue; }       // sobrenome/sigla
+    if(_TOKENS_CITACAO.has(_semAcento(t))) continue;          // ligação conhecida
+    return false;                                             // palavra comum: é prosa
+  }
+  return temNome; // "(1920)" sozinho é data, não citação
+}
 // [12] · [1,2] · [12-15] · [1; 4] — chamadas numéricas de referência
 const RE_CITACAO_COLCH = /\s*\[\s*\d{1,4}(?:\s*[–—,;-]\s*\d{1,4})*\s*\]/g;
 // (Fig. 3) · (Tabela 2) · (Quadro 1.4) — só entre parênteses; "Figura 3" solta fica
 const RE_CHAMADA_FIG = /\s*\((?:v\.?\s*)?(?:fig(?:ura)?|tab(?:ela)?|quadro|gr[áa]fico|graf|anexo|ap[êe]ndice)\.?\s*\d+[.\d]*\s*\)/gi;
 // Marcador de nota colado na palavra: "resultado¹²".
-// Só EXPOENTES — subscritos nunca, senão "H₂O" viraria "HO". E só depois de
-// palavra com 3+ letras, para "m²", "x²", "km²" continuarem inteiros.
-const RE_NOTA_SOBRE = /(\p{L}{3,})[¹²³⁰⁴-⁹]+(?=[\s.,;:!?)\]]|$)/gu;
+// A varredura é guiada pelos EXPOENTES, não pelas letras: escrever
+// /(\p{L}{3,})[¹²]+/ fazia o motor tentar cada posição do texto com um
+// quantificador guloso, e num capítulo longo isso levava segundos (O(n²)).
+// Aqui olhamos só os poucos expoentes e conferimos a vizinhança em O(1).
+// Subscritos ficam de fora de propósito: "H₂O" precisa continuar "H dois O";
+// e exigir palavra de 3+ letras preserva "m²", "x²", "km²".
+const RE_SO_EXPOENTES = /[¹²³⁰⁴-⁹]+/gu;
+function tirarMarcadoresNota(t){
+  return t.replace(RE_SO_EXPOENTES, (m, pos, str) => {
+    const antes = str.slice(Math.max(0, pos - 3), pos);
+    const depois = str[pos + m.length] || '';
+    const palavraAntes = /\p{L}\p{L}\p{L}$/u.test(antes);
+    const fimDeToken = depois === '' || /[\s.,;:!?)\]]/.test(depois);
+    return (palavraAntes && fimDeToken) ? '' : m;
+  });
+}
 // ibid., op. cit., et al. — abreviações que a voz lê letra a letra
 const RE_ABREV_REF = /\s*\b(?:ibid|op\.?\s*cit|loc\.?\s*cit|apud|et\s+al)\.?(?=[\s,;.)]|$)/gi;
 
 function limparFalaCitacoes(texto){
   let t = String(texto || '')
-    .replace(RE_CITACAO_PAREN, '')
+    .replace(RE_PAREN_CURTO, (todo, dentro) => ehConteudoCitacao(dentro) ? '' : todo)
     .replace(RE_CITACAO_COLCH, '')
-    .replace(RE_CHAMADA_FIG, '')
-    .replace(RE_NOTA_SOBRE, '$1')
-    .replace(RE_ABREV_REF, '');
+    .replace(RE_CHAMADA_FIG, '');
+  t = tirarMarcadoresNota(t).replace(RE_ABREV_REF, '');
   // costurar o que sobrou solto: " ." → "." ; ",," → "," ; "( )" → ""
   t = t.replace(/\s+([.,;:!?…])/g, '$1')
        .replace(/\(\s*\)|\[\s*\]/g, '')
@@ -357,6 +394,7 @@ function executarLimpeza(bruto, regras){
 
 Object.assign(window, {
   contarPalavras, RE_TITULO, tituloFalado, ehParagrafoTitulo, ehNumeroPagina, RE_NUM_PAG,
+  ehConteudoCitacao,
   limparFalaCitacoes,
   regraCabecalhoRodape, regraNumeroPagina, regraNotasRodape, regraHifenizacao, regraParagrafos,
   regraEspacos, detectarCapitulosTexto, dividirPorTamanho, classificarCapitulo,

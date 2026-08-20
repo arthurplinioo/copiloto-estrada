@@ -158,6 +158,27 @@ select,input[type=text]{font:inherit;color:var(--tinta);background:var(--superfi
 .texto-leitura h3{font-size:1.05rem;margin:.4em 0 .7em}
 .texto-leitura .frase{cursor:pointer;border-radius:4px}
 .texto-leitura .frase.atual{background:var(--realce);box-shadow:0 0 0 3px var(--realce)}
+
+/* ===== Leitura contínua: o livro rola de ponta a ponta ===== */
+.cap-secao{padding-bottom:.4rem}
+.cap-secao + .cap-secao{margin-top:1.6rem;border-top:1px solid var(--linha);padding-top:1.2rem}
+.cap-cabeca{
+  font-size:.75rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--tinta-2);margin:0 0 .8em;
+}
+/* o capítulo que está tocando ganha um filete discreto */
+.cap-secao.lendo .cap-cabeca{color:var(--destaque)}
+.cap-secao:not(.lendo){opacity:.72}
+.texto-leitura .titulo-secao{color:var(--tinta)}
+
+.barra-navegar{display:flex;gap:.4rem;justify-content:center;flex-wrap:wrap;margin-top:.6rem}
+.nv{
+  min-height:36px;padding:0 .75rem;border-radius:18px;font-size:.78rem;font-weight:600;
+  background:var(--superficie);border:1px solid var(--linha);color:var(--tinta-2);
+}
+.btn-voltar-leitura{
+  display:block;margin:.5rem auto 0;font-size:.82rem;padding:.45rem 1rem;
+}
 .controles{
   position:sticky;bottom:0;background:var(--fundo);
   padding:.8rem 0 max(.8rem, env(safe-area-inset-bottom));
